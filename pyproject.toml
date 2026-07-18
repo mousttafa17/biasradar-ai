@@ -5,6 +5,7 @@ description = "AI-powered media discourse, framing bias, and fact-checking monit
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "fastapi>=0.116.0",
     "feedparser>=6.0.12",
     "httpx>=0.28.1",
     "openai>=2.46.0",
@@ -18,10 +19,12 @@ dependencies = [
     "tenacity>=9.1.4",
     "trafilatura>=2.1.0",
     "typer>=0.27.0",
+    "uvicorn>=0.35.0",
 ]
 
 [project.scripts]
 biasradar = "biasradar.cli:app"
+biasradar-api = "biasradar.api_server:main"
 
 [build-system]
 requires = ["hatchling"]

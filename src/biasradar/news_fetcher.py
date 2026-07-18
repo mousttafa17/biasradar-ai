@@ -1,9 +1,7 @@
 """Fetch recent English-language articles from NewsAPI."""
 
-from datetime import datetime
-
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import BaseModel, Field
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -11,27 +9,17 @@ from tenacity import (
     wait_exponential,
 )
 
+from biasradar.ingestion import IngestedItem
+
 NEWSAPI_EVERYTHING_URL = "https://newsapi.org/v2/everything"
+MAX_QUERY_CHARACTERS = 300
 
 
-class NewsArticle(BaseModel):
-    """Normalized article returned by NewsAPI."""
+class NewsAPIError(RuntimeError):
+    """A sanitized NewsAPI failure that never contains the API key or request URL."""
 
-    model_config = ConfigDict(str_strip_whitespace=True)
 
-    source_name: str = "Unknown"
-    title: str
-    url: HttpUrl
-    author: str | None = None
-    published_at: datetime | None = Field(default=None, validation_alias="publishedAt")
-    description: str | None = None
-    content: str | None = None
-
-    @property
-    def raw_text(self) -> str | None:
-        """Return the best text snippet currently available."""
-
-        return self.description or self.content
+NewsArticle = IngestedItem
 
 
 class NewsAPIResponse(BaseModel):
@@ -59,6 +47,11 @@ class NewsFetcher:
 
         if not 1 <= limit <= 100:
             raise ValueError("limit must be between 1 and 100")
+        query = query.strip()
+        if not query or len(query) > MAX_QUERY_CHARACTERS:
+            raise ValueError(
+                f"query must contain 1 to {MAX_QUERY_CHARACTERS} characters"
+            )
 
         response = httpx.get(
             NEWSAPI_EVERYTHING_URL,
@@ -67,18 +60,34 @@ class NewsFetcher:
                 "language": "en",
                 "sortBy": "publishedAt",
                 "pageSize": limit,
-                "apiKey": self.api_key,
             },
+            headers={"X-Api-Key": self.api_key},
             timeout=self.timeout,
         )
-        response.raise_for_status()
+        if response.is_error:
+            try:
+                provider_message = str(
+                    response.json().get("message", "request rejected")
+                )
+            except (ValueError, AttributeError):
+                provider_message = "request rejected"
+            provider_message = provider_message.replace(self.api_key, "[redacted]")
+            raise NewsAPIError(
+                f"NewsAPI returned HTTP {response.status_code}: "
+                f"{provider_message[:300]}"
+            )
         payload = NewsAPIResponse.model_validate(response.json())
 
         articles: list[NewsArticle] = []
         for item in payload.articles:
             source = item.get("source")
             source_name = source.get("name") if isinstance(source, dict) else None
-            normalized = {**item, "source_name": source_name or "Unknown"}
+            normalized = {
+                **item,
+                "source_name": source_name or "Unknown",
+                "source_type": "news",
+                "provider": "newsapi",
+            }
             try:
                 articles.append(NewsArticle.model_validate(normalized))
             except ValueError:

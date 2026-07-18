@@ -1,29 +1,27 @@
-import httpx
-
 from biasradar.article_cleaner import ArticleCleaner
+from biasradar.security import UnsafeURLError
 
 
 def test_cleaner_extracts_main_text(monkeypatch) -> None:
-    response = httpx.Response(
-        200,
-        request=httpx.Request("GET", "https://example.com/story"),
-        text="<html><body><article><p>Main article text.</p></article></body></html>",
+    cleaner = ArticleCleaner()
+    monkeypatch.setattr(
+        cleaner,
+        "_download",
+        lambda url: (
+            "<html><body><article><p>Main article text.</p></article></body></html>"
+        ),
     )
-    monkeypatch.setattr(httpx, "get", lambda *args, **kwargs: response)
 
-    result = ArticleCleaner().clean("https://example.com/story", "Fallback")
+    result = cleaner.clean("https://example.com/story", "Fallback")
 
     assert result == "Main article text."
 
 
 def test_cleaner_uses_fallback_on_http_error(monkeypatch) -> None:
-    def fail(*args, **kwargs):
-        raise httpx.HTTPStatusError(
-            "blocked",
-            request=httpx.Request("GET", "https://example.com/story"),
-            response=httpx.Response(403),
-        )
+    def fail(url: str) -> str:
+        raise UnsafeURLError("blocked")
 
-    monkeypatch.setattr(httpx, "get", fail)
+    cleaner = ArticleCleaner()
+    monkeypatch.setattr(cleaner, "_download", fail)
 
-    assert ArticleCleaner().clean("https://example.com/story", "Fallback") == "Fallback"
+    assert cleaner.clean("https://example.com/story", "Fallback") == "Fallback"

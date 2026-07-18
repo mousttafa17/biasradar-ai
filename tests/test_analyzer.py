@@ -6,7 +6,8 @@ from biasradar.analyzer import ArticleAnalyzer, StanceLabel
 
 def test_analyzer_validates_structured_json(monkeypatch) -> None:
     payload = {
-        "stance": "evidence_based_criticism",
+        "stance": "anti_subject",
+        "framing_tags": ["evidence_based_criticism"],
         "stance_confidence": 0.8,
         "bias_direction": "critical of the subject",
         "bias_score": 0.4,
@@ -39,5 +40,6 @@ def test_analyzer_validates_structured_json(monkeypatch) -> None:
 
     result = analyzer.analyze("topic", "title", "article text")
 
-    assert result.stance is StanceLabel.EVIDENCE_BASED_CRITICISM
+    assert result.stance is StanceLabel.ANTI_SUBJECT
+    assert result.framing_tags[0].value == "evidence_based_criticism"
     assert result.claims[0].claim_type.value == "verifiable_fact"

@@ -18,11 +18,13 @@ def test_article_row_matches_raw_items_shape() -> None:
         "topic_id": "topic-123",
         "source_name": "Example News",
         "source_type": "news",
+        "ingestion_provider": "unknown",
         "title": "Example title",
         "url": "https://example.com/story",
         "author": None,
         "published_at": None,
         "raw_text": "Example description",
+        "engagement_data": {},
         "language": "en",
         "status": "new",
     }
