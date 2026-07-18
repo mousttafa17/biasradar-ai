@@ -1,7 +1,7 @@
 [project]
 name = "biasradar-ai"
 version = "0.1.0"
-description = "Add your description here"
+description = "AI-powered media discourse, framing bias, and fact-checking monitor"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -19,6 +19,27 @@ dependencies = [
     "trafilatura>=2.1.0",
     "typer>=0.27.0",
 ]
+
+[project.scripts]
+biasradar = "biasradar.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/biasradar"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
 
 [dependency-groups]
 dev = [
