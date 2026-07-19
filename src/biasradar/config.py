@@ -3,8 +3,10 @@
 from functools import lru_cache
 from urllib.parse import urlsplit
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from biasradar.domains.profiles import get_domain_profile
 
 ENV_CONFIG = SettingsConfigDict(
     env_file=".env",
@@ -19,6 +21,7 @@ class APISettings(BaseSettings):
     supabase_url: str
     supabase_service_key: str
     api_cors_origins: str = "http://localhost:3000"
+    api_topic_rate_limit: int = Field(default=10, ge=1, le=100)
 
     model_config = ENV_CONFIG
 
@@ -73,8 +76,10 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_base_url: str = "https://models.github.ai/inference"
     openai_model: str = "openai/gpt-4.1-mini"
+    domain_profile: str = "football-v1"
     google_fact_check_api_key: str | None = None
     rss_feed_urls: str | None = None
+    primary_source_domains: str | None = None
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
 
@@ -115,6 +120,12 @@ class Settings(BaseSettings):
             return None
         return cls.reject_placeholder_secret(value)
 
+    @field_validator("domain_profile")
+    @classmethod
+    def validate_domain_profile(cls, value: str) -> str:
+        get_domain_profile(value)
+        return value
+
     @property
     def configured_rss_feeds(self) -> list[str]:
         """Return comma/newline-separated feed URLs from the environment."""
@@ -124,6 +135,16 @@ class Settings(BaseSettings):
         return [
             value.strip()
             for value in self.rss_feed_urls.replace("\n", ",").split(",")
+            if value.strip()
+        ]
+
+    @property
+    def configured_primary_domains(self) -> list[str]:
+        if not self.primary_source_domains:
+            return []
+        return [
+            value.strip().casefold().removeprefix("www.")
+            for value in self.primary_source_domains.replace("\n", ",").split(",")
             if value.strip()
         ]
 

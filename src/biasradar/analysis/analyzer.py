@@ -13,7 +13,9 @@ from tenacity import (
     wait_exponential,
 )
 
-PROMPT_PATH = Path(__file__).parents[2] / "prompts" / "stance_classifier.txt"
+from biasradar.domains.profiles import DomainProfile, get_domain_profile
+
+PROMPT_PATH = Path(__file__).parents[3] / "prompts" / "stance_classifier.txt"
 MAX_CLAIMS = 25
 CURRENT_PROMPT_VERSION = "stance-v2"
 
@@ -66,6 +68,8 @@ class ArticleAnalysis(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    domain_profile: str = "generic-v1"
+    domain_analysis: dict[str, object] = Field(default_factory=dict)
     stance: StanceLabel
     framing_tags: list[FramingTag] = Field(default_factory=list, max_length=4)
     stance_confidence: float = Field(ge=0, le=1)
@@ -85,10 +89,20 @@ class ArticleAnalysis(BaseModel):
 class ArticleAnalyzer:
     """Analyze articles through GitHub Models or another compatible endpoint."""
 
-    def __init__(self, api_key: str, base_url: str, model: str) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        model: str,
+        domain_profile: str = "generic-v1",
+    ) -> None:
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.model = model
+        self.profile: DomainProfile = get_domain_profile(domain_profile)
+        self.prompt_version = f"{CURRENT_PROMPT_VERSION}+{self.profile.prompt_version}"
         self.system_prompt = PROMPT_PATH.read_text(encoding="utf-8")
+        if self.profile.prompt:
+            self.system_prompt += "\n\n" + self.profile.prompt
 
     @retry(
         retry=retry_if_exception_type(
@@ -128,4 +142,8 @@ class ArticleAnalyzer:
         content = response.choices[0].message.content
         if not content:
             raise ValueError("model returned an empty response")
-        return ArticleAnalysis.model_validate(json.loads(content))
+        result = ArticleAnalysis.model_validate(json.loads(content))
+        if result.domain_profile != self.profile.profile_id:
+            raise ValueError("model returned the wrong domain profile")
+        result.domain_analysis = self.profile.validate_analysis(result.domain_analysis)
+        return result

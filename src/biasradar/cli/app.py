@@ -9,14 +9,40 @@ from pydantic import ValidationError
 from rich.console import Console
 from rich.table import Table
 
-from biasradar.analyzer import CURRENT_PROMPT_VERSION, ArticleAnalyzer
-from biasradar.article_cleaner import ArticleCleaner
+from biasradar.analysis.analyzer import CURRENT_PROMPT_VERSION, ArticleAnalyzer
+from biasradar.analysis.topic_viability import (
+    normalize_topic_query,
+)
 from biasradar.config import get_settings
-from biasradar.db import (
+from biasradar.domains.profiles import get_domain_profile
+from biasradar.evidence.fact_checker import (
+    FactCheckVerdict,
+    GoogleFactChecker,
+    GoogleFactCheckError,
+)
+from biasradar.evidence.primary_sources import discover_primary_evidence
+from biasradar.evidence.verifier import (
+    EVIDENCE_METHOD_VERSION,
+    EvidenceDocument,
+    EvidenceVerifier,
+    combine_atomic_verdicts,
+    decide_atomic_verdict,
+)
+from biasradar.ingestion.cleaner import ArticleCleaner
+from biasradar.ingestion.deduplication import deduplicate_items
+from biasradar.ingestion.newsapi import NewsAPIError, NewsFetcher
+from biasradar.ingestion.rss import RSSFetcher, RSSFetchError
+from biasradar.persistence.repository import (
+    begin_pipeline_run,
     check_database_schema,
+    claim_topic_submissions,
+    create_topic_submission,
+    fail_topic_submission,
     find_topic,
     find_topic_id,
+    finish_pipeline_run,
     get_supabase,
+    heartbeat_pipeline_run,
     insert_articles,
     load_analyzed_items,
     load_checked_claim_ids,
@@ -24,27 +50,16 @@ from biasradar.db import (
     load_claims_for_items,
     load_deduplication_items,
     load_reanalysis_candidates,
+    retry_or_fail_topic_submission,
     save_analysis,
     save_claim_check,
     save_deduplication,
+    save_primary_evidence_candidate,
     save_topic_report,
 )
-from biasradar.deduplicator import deduplicate_items
-from biasradar.evidence_verifier import (
-    EVIDENCE_METHOD_VERSION,
-    EvidenceDocument,
-    EvidenceVerifier,
-    combine_atomic_verdicts,
-    decide_atomic_verdict,
-)
-from biasradar.fact_checker import (
-    FactCheckVerdict,
-    GoogleFactChecker,
-    GoogleFactCheckError,
-)
-from biasradar.news_fetcher import NewsAPIError, NewsFetcher
-from biasradar.report_generator import aggregate_topic, cluster_repeated_claims
-from biasradar.rss_fetcher import RSSFetcher, RSSFetchError
+from biasradar.reporting.generator import aggregate_topic, cluster_repeated_claims
+from biasradar.workflows.pipeline import daily_run_key
+from biasradar.workflows.topic_intake import assess_topic_submission
 
 app = typer.Typer(help="BiasRadar AI — media discourse and fact-checking monitor")
 console = Console()
@@ -159,6 +174,7 @@ def analyze(
         api_key=settings.openai_api_key,
         base_url=settings.openai_base_url,
         model=settings.openai_model,
+        domain_profile=settings.domain_profile,
     )
     analyzed = 0
     analysis_failed = 0
@@ -177,6 +193,7 @@ def analyze(
                 analysis=result,
                 cleaned_text=text,
                 model_id=settings.openai_model,
+                prompt_version=analyzer.prompt_version,
             )
             analyzed += 1
             claims_extracted += len(result.claims)
@@ -254,6 +271,7 @@ def ingest_rss(
         api_key=settings.openai_api_key,
         base_url=settings.openai_base_url,
         model=settings.openai_model,
+        domain_profile=settings.domain_profile,
     )
     analyzed = 0
     failed = 0
@@ -269,6 +287,7 @@ def ingest_rss(
                 analysis=result,
                 cleaned_text=text,
                 model_id=settings.openai_model,
+                prompt_version=analyzer.prompt_version,
             )
             analyzed += 1
         except Exception as error:
@@ -279,6 +298,315 @@ def ingest_rss(
             )
     console.print(f"Analyzed: [green]{analyzed}[/green]")
     console.print(f"Analysis failed: [red]{failed}[/red]")
+
+
+@app.command("run-topic")
+def run_topic(
+    topic: str = typer.Argument(..., help="Stored topic to process end to end."),
+    days: int = typer.Option(30, min=1, max=3650, help="Report lookback window."),
+    news_limit: int = typer.Option(20, min=1, max=100),
+    rss_limit: int = typer.Option(20, min=1, max=100),
+) -> None:
+    """Run an idempotent daily ingestion, analysis, deduplication, and report job."""
+
+    run = None
+    counters: dict[str, int] = {
+        "fetched": 0,
+        "inserted": 0,
+        "duplicates": 0,
+        "analyzed": 0,
+        "analysis_failed": 0,
+        "claims": 0,
+    }
+    provider_errors: list[str] = []
+    try:
+        settings = get_settings()
+        if not settings.openai_api_key:
+            console.print("[red]OPENAI_API_KEY is required for pipeline runs.[/red]")
+            raise typer.Exit(code=2)
+        supabase = get_supabase(settings)
+        missing_schema = check_database_schema(settings)
+        if missing_schema:
+            console.print(
+                "[red]Database schema is not ready.[/red] Run `biasradar health` "
+                "for details."
+            )
+            raise typer.Exit(code=1)
+        topic_row = find_topic(supabase, topic)
+        if not topic_row:
+            console.print(f"[red]Topic not found:[/red] {topic}")
+            raise typer.Exit(code=1)
+
+        requested_end = datetime.now(UTC)
+        requested_start = requested_end - timedelta(days=days)
+        idempotency_key = daily_run_key(
+            topic_id=str(topic_row["id"]),
+            run_date=requested_end.date(),
+            days=days,
+            prompt_version=(
+                f"{CURRENT_PROMPT_VERSION}+"
+                f"{get_domain_profile(settings.domain_profile).prompt_version}"
+            ),
+            model_id=settings.openai_model,
+        )
+        run = begin_pipeline_run(
+            supabase,
+            topic_id=str(topic_row["id"]),
+            idempotency_key=idempotency_key,
+            period_start=requested_start.isoformat(),
+            period_end=requested_end.isoformat(),
+            prompt_version=(
+                f"{CURRENT_PROMPT_VERSION}+"
+                f"{get_domain_profile(settings.domain_profile).prompt_version}"
+            ),
+            model_id=settings.openai_model,
+        )
+        if run.status == "completed":
+            console.print(
+                f"[green]Daily run already completed.[/green] Report: {run.report_id}"
+            )
+            return
+
+        articles = []
+        try:
+            articles.extend(NewsFetcher(settings.newsapi_key).fetch(topic, news_limit))
+        except Exception:
+            provider_errors.append("NewsAPI ingestion failed")
+        if settings.configured_rss_feeds:
+            try:
+                articles.extend(
+                    RSSFetcher(settings.configured_rss_feeds).fetch(topic, rss_limit)
+                )
+            except Exception:
+                provider_errors.append("RSS ingestion failed")
+        counters["fetched"] = len(articles)
+        insert_summary, stored = insert_articles(
+            supabase, articles, str(topic_row["id"])
+        )
+        counters["inserted"] = insert_summary.inserted
+        counters["duplicates"] = insert_summary.skipped_duplicates
+        heartbeat_pipeline_run(supabase, run.run_id)
+
+        cleaner = ArticleCleaner()
+        analyzer = ArticleAnalyzer(
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+            model=settings.openai_model,
+            domain_profile=settings.domain_profile,
+        )
+        for candidate in stored:
+            try:
+                text = cleaner.clean(
+                    str(candidate.article.url), candidate.article.raw_text
+                )
+                if not text:
+                    raise ValueError("no article text could be extracted")
+                result = analyzer.analyze(topic, candidate.article.title, text)
+                save_analysis(
+                    supabase,
+                    raw_item_id=candidate.raw_item_id,
+                    analysis=result,
+                    cleaned_text=text,
+                    model_id=settings.openai_model,
+                    prompt_version=analyzer.prompt_version,
+                )
+                counters["analyzed"] += 1
+                counters["claims"] += len(result.claims)
+            except Exception:
+                counters["analysis_failed"] += 1
+            heartbeat_pipeline_run(supabase, run.run_id)
+
+        deduplication = deduplicate_items(
+            load_deduplication_items(
+                supabase,
+                str(topic_row["id"]),
+                run.period_start,
+                run.period_end,
+            )
+        )
+        save_deduplication(supabase, deduplication)
+        heartbeat_pipeline_run(supabase, run.run_id)
+        items = load_analyzed_items(
+            supabase, str(topic_row["id"]), run.period_start, run.period_end
+        )
+        claims = load_claims_for_items(supabase, items)
+        checks = load_claim_checks(supabase, [claim.claim_id for claim in claims])
+        topic_report = aggregate_topic(
+            topic_id=str(topic_row["id"]),
+            topic_name=str(topic_row["name"]),
+            period_start=datetime.fromisoformat(run.period_start),
+            period_end=datetime.fromisoformat(run.period_end),
+            items=items,
+            claims=claims,
+            claim_checks=checks,
+        )
+        report_id = save_topic_report(
+            supabase, topic_report, pipeline_run_id=run.run_id
+        )
+        counters["independent_content_groups"] = topic_report.independent_content_groups
+        finish_pipeline_run(
+            supabase,
+            run.run_id,
+            status="completed",
+            counters=counters,
+            provider_errors=provider_errors,
+            report_id=report_id,
+        )
+    except typer.Exit:
+        raise
+    except Exception as error:
+        if run:
+            try:
+                finish_pipeline_run(
+                    supabase,
+                    run.run_id,
+                    status="failed",
+                    counters=counters,
+                    provider_errors=provider_errors,
+                    error_summary=_safe_analysis_error(error),
+                )
+            except Exception:
+                pass
+        console.print(f"[red]Pipeline run failed:[/red] {_safe_analysis_error(error)}")
+        raise typer.Exit(code=1) from error
+
+    console.print(f"[green]Pipeline run completed:[/green] {run.run_id}")
+    console.print(f"Report: {report_id}")
+    for key, value in counters.items():
+        console.print(f"{key.replace('_', ' ').title()}: {value}")
+    for message in provider_errors:
+        console.print(f"[yellow]{message}[/yellow]")
+
+
+@app.command("assess-topic")
+def assess_topic(
+    query: str = typer.Argument(..., help="Proposed controversial media topic."),
+    probe_limit: int = typer.Option(
+        20, min=5, max=100, help="Maximum results per configured provider."
+    ),
+) -> None:
+    """Assess topic viability before creating an active monitored topic."""
+
+    submission = None
+    try:
+        normalized_query = normalize_topic_query(query)
+        settings = get_settings()
+        if not settings.openai_api_key:
+            console.print("[red]OPENAI_API_KEY is required for topic intake.[/red]")
+            raise typer.Exit(code=2)
+        supabase = get_supabase(settings)
+        missing_schema = check_database_schema(settings)
+        if missing_schema:
+            console.print(
+                "[red]Database schema is not ready.[/red] Run `biasradar health` "
+                "for details."
+            )
+            raise typer.Exit(code=1)
+        submission = create_topic_submission(supabase, normalized_query)
+        if submission.status not in {"submitted", "assessing", "failed"}:
+            console.print(
+                f"[green]Submission already assessed:[/green] {submission.status}"
+            )
+            if submission.topic_id:
+                console.print(f"Topic: {submission.topic_id}")
+            return
+
+        assessment, signals, topic_id = assess_topic_submission(
+            supabase,
+            settings,
+            submission_id=submission.submission_id,
+            query=normalized_query,
+            probe_limit=probe_limit,
+        )
+    except typer.Exit:
+        raise
+    except ValueError as error:
+        console.print(f"[red]Invalid topic submission:[/red] {error}")
+        raise typer.Exit(code=2) from error
+    except Exception as error:
+        if submission:
+            try:
+                fail_topic_submission(supabase, submission.submission_id)
+            except Exception:
+                pass
+        console.print(
+            f"[red]Topic assessment failed:[/red] {_safe_analysis_error(error)}"
+        )
+        raise typer.Exit(code=1) from error
+
+    table = Table("Signal", "Result", show_header=False)
+    table.add_row("Status", assessment.status.value)
+    table.add_row("Confidence", f"{assessment.confidence:.0%}")
+    table.add_row("Coverage items", str(signals.item_count))
+    table.add_row("Independent sources", str(signals.independent_source_count))
+    table.add_row("Canonical topic", assessment.definition.canonical_name)
+    console.print(table)
+    for reason in assessment.reasons:
+        console.print(f"- {reason}")
+    for question in assessment.clarification_questions:
+        console.print(f"[yellow]Clarification:[/yellow] {question}")
+    if topic_id:
+        console.print(f"[green]Monitored topic created:[/green] {topic_id}")
+
+
+@app.command("process-topic-submissions")
+def process_topic_submissions(
+    limit: int = typer.Option(10, min=1, max=50, help="Maximum queue claims."),
+    probe_limit: int = typer.Option(20, min=5, max=100),
+) -> None:
+    """Claim and process queued topic submissions with bounded retries."""
+
+    try:
+        settings = get_settings()
+        if not settings.openai_api_key:
+            console.print("[red]OPENAI_API_KEY is required for intake workers.[/red]")
+            raise typer.Exit(code=2)
+        supabase = get_supabase(settings)
+        missing_schema = check_database_schema(settings)
+        if missing_schema:
+            console.print(
+                "[red]Database schema is not ready.[/red] Run `biasradar health`."
+            )
+            raise typer.Exit(code=1)
+        submissions = claim_topic_submissions(supabase, limit)
+    except typer.Exit:
+        raise
+    except Exception as error:
+        console.print("[red]Could not claim topic submissions.[/red]")
+        raise typer.Exit(code=1) from error
+
+    if not submissions:
+        console.print("[green]No topic submissions are ready.[/green]")
+        return
+    completed = 0
+    failed = 0
+    for submission in submissions:
+        try:
+            assessment, _, topic_id = assess_topic_submission(
+                supabase,
+                settings,
+                submission_id=submission.submission_id,
+                query=submission.query,
+                probe_limit=probe_limit,
+            )
+            completed += 1
+            console.print(
+                f"[green]{assessment.status.value}[/green] — {submission.query}"
+                + (f" ({topic_id})" if topic_id else "")
+            )
+        except Exception:
+            failed += 1
+            try:
+                retry_or_fail_topic_submission(
+                    supabase,
+                    submission.submission_id,
+                    submission.attempt_count,
+                )
+            except Exception:
+                pass
+            console.print(f"[red]Assessment failed[/red] — {submission.query}")
+    console.print(f"Completed: [green]{completed}[/green]")
+    console.print(f"Failed/retried: [red]{failed}[/red]")
 
 
 @app.command()
@@ -422,6 +750,30 @@ def report(
     )
     console.print(f"\n[bold]{topic_report.topic_name}[/bold]")
     console.print(table)
+    if topic_report.football_summary:
+        football_table = Table("Football stance", "Weighted coverage")
+        for stance, percent in sorted(
+            topic_report.football_summary.stance_distribution.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        ):
+            if percent > 0:
+                football_table.add_row(stance, f"{percent:.1f}%")
+        console.print("\n[bold]Football narrative[/bold]")
+        console.print(football_table)
+        controversy_types = topic_report.football_summary.controversy_type_counts
+        if controversy_types:
+            console.print(
+                "Controversy types: "
+                + ", ".join(
+                    f"{name} ({count})"
+                    for name, count in sorted(
+                        controversy_types.items(),
+                        key=lambda item: item[1],
+                        reverse=True,
+                    )
+                )
+            )
     console.print(f"\n{topic_report.report_text}")
     if topic_report.repeated_claim_clusters:
         claim_table = Table(
@@ -529,6 +881,10 @@ def reanalyze(
             period_start=period_start.isoformat(),
             period_end=period_end.isoformat(),
             model_id=settings.openai_model,
+            prompt_version=(
+                f"{CURRENT_PROMPT_VERSION}+"
+                f"{get_domain_profile(settings.domain_profile).prompt_version}"
+            ),
             only_stale=not force,
         )
     except typer.Exit:
@@ -545,6 +901,7 @@ def reanalyze(
         api_key=settings.openai_api_key,
         base_url=settings.openai_base_url,
         model=settings.openai_model,
+        domain_profile=settings.domain_profile,
     )
     cleaner = ArticleCleaner()
     updated = 0
@@ -568,6 +925,7 @@ def reanalyze(
                 analysis=result,
                 cleaned_text=text,
                 model_id=settings.openai_model,
+                prompt_version=analyzer.prompt_version,
             )
             updated += 1
             claims_extracted += len(result.claims)
@@ -587,6 +945,109 @@ def reanalyze(
     console.print(f"Updated: [green]{updated}[/green]")
     console.print(f"Claims extracted: {claims_extracted}")
     console.print(f"Failed: [red]{failed}[/red]")
+
+
+@app.command("discover-primary-evidence")
+def discover_primary_evidence_command(
+    topic: str = typer.Argument(..., help="Stored topic whose claims need evidence."),
+    domain: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--domain",
+            help="Official hostname; repeat it or configure PRIMARY_SOURCE_DOMAINS.",
+        ),
+    ] = None,
+    days: int = typer.Option(30, min=1, max=3650),
+    claim_limit: int = typer.Option(10, min=1, max=50),
+    evidence_limit: int = typer.Option(5, min=1, max=10),
+    min_importance: float = typer.Option(0.7, min=0, max=1),
+) -> None:
+    """Discover official-domain evidence candidates for current claims."""
+
+    try:
+        settings = get_settings()
+        if not settings.openai_api_key:
+            console.print("[red]OPENAI_API_KEY is required.[/red]")
+            raise typer.Exit(code=2)
+        domains = domain or settings.configured_primary_domains
+        if not domains:
+            console.print(
+                "[red]At least one official domain is required.[/red] Use --domain "
+                "or PRIMARY_SOURCE_DOMAINS."
+            )
+            raise typer.Exit(code=2)
+        supabase = get_supabase(settings)
+        if check_database_schema(settings):
+            console.print("[red]Database schema is not ready.[/red]")
+            raise typer.Exit(code=1)
+        topic_row = find_topic(supabase, topic)
+        if not topic_row:
+            console.print(f"[red]Topic not found:[/red] {topic}")
+            raise typer.Exit(code=1)
+        period_end = datetime.now(UTC)
+        period_start = period_end - timedelta(days=days)
+        items = load_analyzed_items(
+            supabase,
+            str(topic_row["id"]),
+            period_start.isoformat(),
+            period_end.isoformat(),
+        )
+        claims = sorted(
+            (
+                claim
+                for claim in load_claims_for_items(supabase, items)
+                if claim.checkability in {"checkable", "partly_checkable"}
+                and claim.importance_score >= min_importance
+            ),
+            key=lambda claim: claim.importance_score,
+            reverse=True,
+        )[:claim_limit]
+    except typer.Exit:
+        raise
+    except Exception as error:
+        console.print("[red]Could not load evidence discovery candidates.[/red]")
+        raise typer.Exit(code=1) from error
+
+    searcher = NewsFetcher(settings.newsapi_key)
+    cleaner = ArticleCleaner()
+    verifier = EvidenceVerifier(
+        api_key=settings.openai_api_key,
+        base_url=settings.openai_base_url,
+        model=settings.openai_model,
+    )
+    item_by_id = {item.raw_item_id: item for item in items}
+    saved = 0
+    failed = 0
+    for claim in claims:
+        try:
+            candidates = discover_primary_evidence(
+                claim_text=claim.claim_text,
+                domains=domains,
+                searcher=searcher,
+                cleaner=cleaner,
+                verifier=verifier,
+                limit=evidence_limit,
+                excluded_urls={item_by_id[claim.raw_item_id].url},
+            )
+            for candidate in candidates:
+                save_primary_evidence_candidate(
+                    supabase,
+                    claim_id=claim.claim_id,
+                    candidate=candidate,
+                    model_id=settings.openai_model,
+                )
+                saved += 1
+            console.print(
+                f"[green]{len(candidates)} candidates[/green] — {claim.claim_text}"
+            )
+        except Exception as error:
+            failed += 1
+            console.print(
+                f"[red]Discovery failed[/red] — {claim.claim_text[:160]}: "
+                f"{_safe_analysis_error(error)}"
+            )
+    console.print(f"Saved candidates: [green]{saved}[/green]")
+    console.print(f"Failed claims: [red]{failed}[/red]")
 
 
 @app.command("fact-check")

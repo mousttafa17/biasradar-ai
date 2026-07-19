@@ -1,4 +1,5 @@
-from biasradar.evidence_verifier import (
+from biasradar.evidence.fact_checker import FactCheckVerdict
+from biasradar.evidence.verifier import (
     EvidenceAssessment,
     EvidenceDocument,
     EvidenceRelation,
@@ -6,7 +7,6 @@ from biasradar.evidence_verifier import (
     combine_atomic_verdicts,
     decide_atomic_verdict,
 )
-from biasradar.fact_checker import FactCheckVerdict
 
 
 def _assessment(

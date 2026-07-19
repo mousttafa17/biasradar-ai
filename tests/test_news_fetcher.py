@@ -1,6 +1,6 @@
 import httpx
 
-from biasradar.news_fetcher import NewsAPIError, NewsFetcher
+from biasradar.ingestion.newsapi import NewsAPIError, NewsFetcher
 
 
 def test_fetch_normalizes_newsapi_articles(monkeypatch) -> None:

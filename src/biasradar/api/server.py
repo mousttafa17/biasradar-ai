@@ -14,7 +14,7 @@ def main() -> None:
     parser.add_argument("--reload", action="store_true")
     arguments = parser.parse_args()
     uvicorn.run(
-        "biasradar.api:app",
+        "biasradar.api.app:app",
         host=arguments.host,
         port=arguments.port,
         reload=arguments.reload,

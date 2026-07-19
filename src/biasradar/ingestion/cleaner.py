@@ -9,7 +9,11 @@ from tenacity import (
     wait_exponential,
 )
 
-from biasradar.security import UnsafeURLError, validate_public_url, validated_redirect
+from biasradar.common.security import (
+    UnsafeURLError,
+    validate_public_url,
+    validated_redirect,
+)
 
 MAX_ARTICLE_CHARACTERS = 40_000
 MAX_DOWNLOAD_BYTES = 2_000_000

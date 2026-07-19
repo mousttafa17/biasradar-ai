@@ -1,4 +1,4 @@
-from biasradar.db import get_supabase
+from biasradar.persistence.repository import get_supabase
 
 
 def main() -> None:

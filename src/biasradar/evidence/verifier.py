@@ -13,9 +13,9 @@ from tenacity import (
     wait_exponential,
 )
 
-from biasradar.fact_checker import FactCheckVerdict
+from biasradar.evidence.fact_checker import FactCheckVerdict
 
-PROMPT_PATH = Path(__file__).parents[2] / "prompts" / "evidence_verifier.txt"
+PROMPT_PATH = Path(__file__).parents[3] / "prompts" / "evidence_verifier.txt"
 EVIDENCE_METHOD_VERSION = "news-evidence-v1"
 MAX_ATOMIC_CLAIMS = 5
 MAX_EVIDENCE_DOCUMENTS = 5

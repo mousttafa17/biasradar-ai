@@ -1,7 +1,7 @@
 import json
 from types import SimpleNamespace
 
-from biasradar.analyzer import ArticleAnalyzer, StanceLabel
+from biasradar.analysis.analyzer import ArticleAnalyzer, StanceLabel
 
 
 def test_analyzer_validates_structured_json(monkeypatch) -> None:

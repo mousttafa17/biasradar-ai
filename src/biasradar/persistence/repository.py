@@ -1,22 +1,31 @@
 """Supabase access helpers for topics and raw news items."""
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
 from postgrest.exceptions import APIError
 
-from biasradar.analyzer import CURRENT_PROMPT_VERSION, ArticleAnalysis
+from biasradar.analysis.analyzer import CURRENT_PROMPT_VERSION, ArticleAnalysis
+from biasradar.analysis.topic_viability import (
+    TOPIC_VIABILITY_PROMPT_VERSION,
+    CoverageSignals,
+    TopicViabilityAssessment,
+    normalize_topic_query,
+    topic_query_hash,
+    topic_similarity,
+)
 from biasradar.config import Settings, get_settings
-from biasradar.deduplicator import (
+from biasradar.evidence.fact_checker import FACT_CHECK_METHOD_VERSION, FactCheckResult
+from biasradar.evidence.primary_sources import PrimaryEvidenceCandidate
+from biasradar.evidence.verifier import EvidenceVerificationResult
+from biasradar.ingestion.deduplication import (
     DeduplicationItem,
     DeduplicationResult,
 )
-from biasradar.evidence_verifier import EvidenceVerificationResult
-from biasradar.fact_checker import FACT_CHECK_METHOD_VERSION, FactCheckResult
-from biasradar.ingestion import IngestedItem
-from biasradar.report_generator import (
+from biasradar.ingestion.models import IngestedItem
+from biasradar.reporting.generator import (
     AnalyzedItem,
     ClaimCheckItem,
     ClaimItem,
@@ -54,6 +63,8 @@ REQUIRED_COLUMNS = {
         "prompt_version",
         "model_id",
         "is_current",
+        "domain_profile",
+        "domain_analysis",
         "stance",
         "framing_tags",
         "stance_confidence",
@@ -98,6 +109,97 @@ REQUIRED_COLUMNS = {
         "deduplicated_items",
         "report_text",
         "report_data",
+        "pipeline_run_id",
+    },
+    "pipeline_runs": {
+        "id",
+        "topic_id",
+        "idempotency_key",
+        "status",
+        "period_start",
+        "period_end",
+        "prompt_version",
+        "model_id",
+        "counters",
+        "provider_errors",
+        "error_summary",
+        "report_id",
+        "started_at",
+        "heartbeat_at",
+        "finished_at",
+    },
+    "topic_submissions": {
+        "id",
+        "raw_query",
+        "normalized_query",
+        "query_hash",
+        "status",
+        "topic_id",
+        "created_at",
+        "assessed_at",
+        "user_id",
+        "idempotency_key",
+        "attempt_count",
+        "lease_expires_at",
+        "next_attempt_at",
+        "updated_at",
+    },
+    "topic_intake_rate_limits": {
+        "identity_hash",
+        "window_start",
+        "request_count",
+    },
+    "evidence_candidates": {
+        "id",
+        "claim_id",
+        "url",
+        "canonical_url",
+        "title",
+        "publisher",
+        "published_at",
+        "source_domain",
+        "content_hash",
+        "discovery_method",
+        "retrieved_at",
+        "review_status",
+    },
+    "evidence_automated_assessments": {
+        "id",
+        "evidence_candidate_id",
+        "relation",
+        "source_role",
+        "relevance_score",
+        "excerpt",
+        "reasoning",
+        "method_version",
+        "model_id",
+        "created_at",
+    },
+    "evidence_reviews": {
+        "id",
+        "evidence_candidate_id",
+        "reviewer_user_id",
+        "decision",
+        "corrected_relation",
+        "corrected_source_role",
+        "corrected_excerpt",
+        "final_verdict",
+        "confidence",
+        "notes",
+        "created_at",
+    },
+    "topic_viability_assessments": {
+        "id",
+        "submission_id",
+        "status",
+        "confidence",
+        "coverage_signals",
+        "topic_definition",
+        "reasons",
+        "clarification_questions",
+        "duplicate_topic_id",
+        "prompt_version",
+        "model_id",
     },
     "claim_checks": {
         "id",
@@ -115,7 +217,16 @@ REQUIRED_COLUMNS = {
         "checked_at",
     },
 }
-ANALYSIS_RPC_PATH = "/rpc/save_article_analysis"
+REQUIRED_RPC_PATHS = {
+    "/rpc/save_article_analysis": "function save_article_analysis",
+    "/rpc/begin_pipeline_run": "function begin_pipeline_run",
+    "/rpc/save_topic_viability": "function save_topic_viability",
+    "/rpc/consume_topic_intake_rate_limit": (
+        "function consume_topic_intake_rate_limit"
+    ),
+    "/rpc/claim_topic_submissions": "function claim_topic_submissions",
+    "/rpc/submit_evidence_review": "function submit_evidence_review",
+}
 
 
 @dataclass(slots=True)
@@ -145,6 +256,31 @@ class ReanalysisCandidate:
     fallback_text: str | None
     cleaned_text: str | None
     current_version: int | None
+
+
+@dataclass(slots=True)
+class PipelineRun:
+    """A claimed idempotent orchestration run."""
+
+    run_id: str
+    status: str
+    report_id: str | None
+    period_start: str
+    period_end: str
+
+
+@dataclass(slots=True)
+class TopicSubmission:
+    submission_id: str
+    status: str
+    topic_id: str | None
+
+
+@dataclass(slots=True)
+class ClaimedTopicSubmission:
+    submission_id: str
+    query: str
+    attempt_count: int
 
 
 def get_supabase(settings: Settings | None = None) -> Client:
@@ -184,8 +320,10 @@ def check_database_schema(settings: Settings) -> list[str]:
         missing.extend(
             f"column {table}.{column}" for column in sorted(expected - actual)
         )
-    if ANALYSIS_RPC_PATH not in document.get("paths", {}):
-        missing.append("function save_article_analysis")
+    paths = document.get("paths", {})
+    for path, label in REQUIRED_RPC_PATHS.items():
+        if path not in paths:
+            missing.append(label)
     return missing
 
 
@@ -224,6 +362,143 @@ def find_topic(client: Client, topic_name: str) -> dict[str, Any] | None:
             .execute()
         )
     return response.data[0] if response.data else None
+
+
+def create_topic_submission(client: Client, query: str) -> TopicSubmission:
+    """Create or reclaim an idempotent normalized topic submission."""
+
+    normalized = normalize_topic_query(query)
+    query_hash = topic_query_hash(normalized)
+    existing = (
+        client.table("topic_submissions")
+        .select("id,status,topic_id")
+        .eq("query_hash", query_hash)
+        .limit(1)
+        .execute()
+    )
+    if existing.data:
+        row = existing.data[0]
+        if row["status"] == "failed":
+            client.table("topic_submissions").update(
+                {"status": "assessing", "assessed_at": None}
+            ).eq("id", row["id"]).execute()
+            row["status"] = "assessing"
+        return TopicSubmission(
+            submission_id=str(row["id"]),
+            status=str(row["status"]),
+            topic_id=str(row["topic_id"]) if row.get("topic_id") else None,
+        )
+    response = (
+        client.table("topic_submissions")
+        .insert(
+            {
+                "raw_query": query,
+                "normalized_query": normalized,
+                "query_hash": query_hash,
+                "status": "assessing",
+            }
+        )
+        .execute()
+    )
+    if not response.data or "id" not in response.data[0]:
+        raise ValueError("Supabase did not return a topic submission id")
+    return TopicSubmission(
+        submission_id=str(response.data[0]["id"]),
+        status="assessing",
+        topic_id=None,
+    )
+
+
+def find_similar_topic(
+    client: Client, query: str, threshold: float = 0.72
+) -> dict[str, Any] | None:
+    """Find a strongly overlapping active topic using transparent token similarity."""
+
+    response = (
+        client.table("topics")
+        .select("id,name")
+        .eq("status", "active")
+        .limit(500)
+        .execute()
+    )
+    candidates = [
+        (topic_similarity(query, str(row["name"])), row) for row in response.data
+    ]
+    score, row = max(candidates, default=(0.0, None), key=lambda item: item[0])
+    return row if row and score >= threshold else None
+
+
+def fail_topic_submission(client: Client, submission_id: str) -> None:
+    """Mark an intake attempt failed without persisting sensitive diagnostics."""
+
+    client.table("topic_submissions").update(
+        {"status": "failed", "assessed_at": datetime.now(UTC).isoformat()}
+    ).eq("id", submission_id).execute()
+
+
+def retry_or_fail_topic_submission(
+    client: Client, submission_id: str, attempt_count: int
+) -> None:
+    """Schedule a bounded retry, or mark a submission terminally failed."""
+
+    terminal = attempt_count >= 3
+    delay_minutes = min(2**attempt_count, 30)
+    client.table("topic_submissions").update(
+        {
+            "status": "failed" if terminal else "submitted",
+            "lease_expires_at": None,
+            "next_attempt_at": (
+                None
+                if terminal
+                else (datetime.now(UTC) + timedelta(minutes=delay_minutes)).isoformat()
+            ),
+            "assessed_at": datetime.now(UTC).isoformat() if terminal else None,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+    ).eq("id", submission_id).execute()
+
+
+def claim_topic_submissions(client: Client, limit: int) -> list[ClaimedTopicSubmission]:
+    """Atomically lease queued or abandoned submissions to one worker."""
+
+    response = client.rpc("claim_topic_submissions", {"p_limit": limit}).execute()
+    return [
+        ClaimedTopicSubmission(
+            submission_id=str(row["id"]),
+            query=str(row["normalized_query"]),
+            attempt_count=int(row["attempt_count"]),
+        )
+        for row in response.data or []
+    ]
+
+
+def save_topic_viability(
+    client: Client,
+    *,
+    submission_id: str,
+    assessment: TopicViabilityAssessment,
+    signals: CoverageSignals,
+    model_id: str,
+    duplicate_topic_id: str | None = None,
+) -> str | None:
+    """Atomically save an assessment and create a topic only when accepted."""
+
+    response = client.rpc(
+        "save_topic_viability",
+        {
+            "p_submission_id": submission_id,
+            "p_status": assessment.status.value,
+            "p_confidence": assessment.confidence,
+            "p_coverage_signals": signals.model_dump(mode="json"),
+            "p_topic_definition": assessment.definition.model_dump(mode="json"),
+            "p_reasons": assessment.reasons,
+            "p_clarification_questions": assessment.clarification_questions,
+            "p_duplicate_topic_id": duplicate_topic_id,
+            "p_prompt_version": TOPIC_VIABILITY_PROMPT_VERSION,
+            "p_model_id": model_id,
+        },
+    ).execute()
+    return str(response.data) if response.data else None
 
 
 def article_row(article: IngestedItem, topic_id: str | None) -> dict[str, Any]:
@@ -355,7 +630,8 @@ def load_analyzed_items(
     analysis_response = (
         client.table("analysis")
         .select(
-            "id,raw_item_id,stance,framing_tags,stance_confidence,"
+            "id,raw_item_id,domain_profile,domain_analysis,stance,framing_tags,"
+            "stance_confidence,"
             "loaded_language_score,one_sidedness_score,"
             "evidence_quality_score,emotionality_score"
         )
@@ -551,40 +827,128 @@ def load_reanalysis_candidates(
     return candidates
 
 
-def save_topic_report(client: Client, report: TopicReport) -> str:
+def save_topic_report(
+    client: Client,
+    report: TopicReport,
+    pipeline_run_id: str | None = None,
+) -> str:
     """Save a frontend-ready topic report and return its identifier."""
 
     distribution = report.stance_distribution
+    row = {
+        "topic_id": report.topic_id,
+        "period_start": report.period_start.isoformat(),
+        "period_end": report.period_end.isoformat(),
+        "total_items": report.total_items,
+        "pro_percent": distribution["pro_subject"],
+        "anti_percent": distribution["anti_subject"],
+        "neutral_percent": distribution["neutral"],
+        "mixed_percent": distribution["mixed"],
+        "unclear_percent": distribution["unclear"],
+        "directional_pro_percent": report.directional_pro_percent,
+        "directional_anti_percent": report.directional_anti_percent,
+        "overall_bias_score": report.overall_bias_score,
+        "confidence_score": report.confidence_score,
+        "source_count": report.source_count,
+        "independent_content_groups": report.independent_content_groups,
+        "syndicated_items": report.syndicated_items,
+        "deduplicated_items": report.deduplicated_items,
+        "report_text": report.report_text,
+        "report_data": report.model_dump(mode="json"),
+        "pipeline_run_id": pipeline_run_id,
+    }
+    query = client.table("topic_reports")
     response = (
-        client.table("topic_reports")
-        .insert(
-            {
-                "topic_id": report.topic_id,
-                "period_start": report.period_start.isoformat(),
-                "period_end": report.period_end.isoformat(),
-                "total_items": report.total_items,
-                "pro_percent": distribution["pro_subject"],
-                "anti_percent": distribution["anti_subject"],
-                "neutral_percent": distribution["neutral"],
-                "mixed_percent": distribution["mixed"],
-                "unclear_percent": distribution["unclear"],
-                "directional_pro_percent": report.directional_pro_percent,
-                "directional_anti_percent": report.directional_anti_percent,
-                "overall_bias_score": report.overall_bias_score,
-                "confidence_score": report.confidence_score,
-                "source_count": report.source_count,
-                "independent_content_groups": report.independent_content_groups,
-                "syndicated_items": report.syndicated_items,
-                "deduplicated_items": report.deduplicated_items,
-                "report_text": report.report_text,
-                "report_data": report.model_dump(mode="json"),
-            }
-        )
-        .execute()
+        query.upsert(row, on_conflict="pipeline_run_id").execute()
+        if pipeline_run_id
+        else query.insert(row).execute()
     )
     if not response.data or "id" not in response.data[0]:
         raise ValueError("Supabase insert did not return a topic report id")
     return str(response.data[0]["id"])
+
+
+def begin_pipeline_run(
+    client: Client,
+    *,
+    topic_id: str,
+    idempotency_key: str,
+    period_start: str,
+    period_end: str,
+    prompt_version: str,
+    model_id: str,
+) -> PipelineRun:
+    """Atomically claim a run or return its already-completed result."""
+
+    response = client.rpc(
+        "begin_pipeline_run",
+        {
+            "p_topic_id": topic_id,
+            "p_idempotency_key": idempotency_key,
+            "p_period_start": period_start,
+            "p_period_end": period_end,
+            "p_prompt_version": prompt_version,
+            "p_model_id": model_id,
+        },
+    ).execute()
+    row = response.data[0] if isinstance(response.data, list) else response.data
+    if not row or "id" not in row:
+        raise ValueError("Supabase did not return a pipeline run")
+    return PipelineRun(
+        run_id=str(row["id"]),
+        status=str(row["status"]),
+        report_id=str(row["report_id"]) if row.get("report_id") else None,
+        period_start=str(row["period_start"]),
+        period_end=str(row["period_end"]),
+    )
+
+
+def finish_pipeline_run(
+    client: Client,
+    run_id: str,
+    *,
+    status: str,
+    counters: dict[str, int],
+    provider_errors: list[str],
+    report_id: str | None = None,
+    error_summary: str | None = None,
+) -> None:
+    """Finish a claimed run with bounded, sanitized audit information."""
+
+    if status not in {"completed", "failed"}:
+        raise ValueError("pipeline run can finish only as completed or failed")
+    response = (
+        client.table("pipeline_runs")
+        .update(
+            {
+                "status": status,
+                "counters": counters,
+                "provider_errors": provider_errors[:20],
+                "report_id": report_id,
+                "error_summary": error_summary[:500] if error_summary else None,
+                "finished_at": datetime.now(UTC).isoformat(),
+            }
+        )
+        .eq("id", run_id)
+        .eq("status", "running")
+        .execute()
+    )
+    if not response.data:
+        raise ValueError("pipeline run was not active when finishing")
+
+
+def heartbeat_pipeline_run(client: Client, run_id: str) -> None:
+    """Renew an active run lease so crashed jobs can later be reclaimed."""
+
+    response = (
+        client.table("pipeline_runs")
+        .update({"heartbeat_at": datetime.now(UTC).isoformat()})
+        .eq("id", run_id)
+        .eq("status", "running")
+        .execute()
+    )
+    if not response.data:
+        raise ValueError("pipeline run lease is no longer active")
 
 
 def load_checked_claim_ids(client: Client, claim_ids: list[str]) -> set[str]:
@@ -651,3 +1015,59 @@ def save_claim_check(
     if not response.data or "id" not in response.data[0]:
         raise ValueError("Supabase upsert did not return a claim check id")
     return str(response.data[0]["id"])
+
+
+def save_primary_evidence_candidate(
+    client: Client,
+    *,
+    claim_id: str,
+    candidate: PrimaryEvidenceCandidate,
+    model_id: str,
+) -> str:
+    """Persist a candidate and an immutable versioned automated assessment."""
+
+    response = (
+        client.table("evidence_candidates")
+        .upsert(
+            {
+                "claim_id": claim_id,
+                "url": candidate.url,
+                "canonical_url": candidate.canonical_url,
+                "title": candidate.title,
+                "publisher": candidate.publisher,
+                "published_at": candidate.published_at,
+                "source_domain": candidate.source_domain,
+                "content_hash": candidate.content_hash,
+                "discovery_method": candidate.discovery_method,
+            },
+            on_conflict="claim_id,canonical_url",
+        )
+        .execute()
+    )
+    if not response.data or "id" not in response.data[0]:
+        raise ValueError("Supabase did not return an evidence candidate id")
+    candidate_id = str(response.data[0]["id"])
+    existing = (
+        client.table("evidence_automated_assessments")
+        .select("id")
+        .eq("evidence_candidate_id", candidate_id)
+        .eq("method_version", candidate.discovery_method)
+        .eq("model_id", model_id)
+        .limit(1)
+        .execute()
+    )
+    if not existing.data:
+        assessment = candidate.assessment
+        client.table("evidence_automated_assessments").insert(
+            {
+                "evidence_candidate_id": candidate_id,
+                "relation": assessment.relation.value,
+                "source_role": assessment.source_role.value,
+                "relevance_score": assessment.relevance_score,
+                "excerpt": assessment.excerpt,
+                "reasoning": assessment.reasoning,
+                "method_version": candidate.discovery_method,
+                "model_id": model_id,
+            }
+        ).execute()
+    return candidate_id

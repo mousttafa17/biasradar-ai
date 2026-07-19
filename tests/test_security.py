@@ -2,7 +2,11 @@ import socket
 
 import pytest
 
-from biasradar.security import UnsafeURLError, validate_public_url, validated_redirect
+from biasradar.common.security import (
+    UnsafeURLError,
+    validate_public_url,
+    validated_redirect,
+)
 
 
 def _address(ip: str):

@@ -1,4 +1,4 @@
-from biasradar.rss_fetcher import RSSFetcher
+from biasradar.ingestion.rss import RSSFetcher
 
 
 def test_rss_fetcher_normalizes_and_filters_entries(monkeypatch) -> None:

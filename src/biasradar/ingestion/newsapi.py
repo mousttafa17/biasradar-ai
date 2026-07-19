@@ -1,5 +1,7 @@
 """Fetch recent English-language articles from NewsAPI."""
 
+import re
+
 import httpx
 from pydantic import BaseModel, Field
 from tenacity import (
@@ -9,10 +11,11 @@ from tenacity import (
     wait_exponential,
 )
 
-from biasradar.ingestion import IngestedItem
+from biasradar.ingestion.models import IngestedItem
 
 NEWSAPI_EVERYTHING_URL = "https://newsapi.org/v2/everything"
 MAX_QUERY_CHARACTERS = 300
+DOMAIN_PATTERN = re.compile(r"^[a-z0-9.-]+$")
 
 
 class NewsAPIError(RuntimeError):
@@ -42,7 +45,12 @@ class NewsFetcher:
         wait=wait_exponential(multiplier=0.5, min=0.5, max=2),
         reraise=True,
     )
-    def fetch(self, query: str, limit: int = 5) -> list[NewsArticle]:
+    def fetch(
+        self,
+        query: str,
+        limit: int = 5,
+        domains: list[str] | None = None,
+    ) -> list[NewsArticle]:
         """Fetch at most ``limit`` recent articles for ``query``."""
 
         if not 1 <= limit <= 100:
@@ -52,15 +60,25 @@ class NewsFetcher:
             raise ValueError(
                 f"query must contain 1 to {MAX_QUERY_CHARACTERS} characters"
             )
+        normalized_domains = [
+            domain.casefold().removeprefix("www.") for domain in domains or []
+        ]
+        if len(normalized_domains) > 20 or any(
+            not DOMAIN_PATTERN.fullmatch(domain) for domain in normalized_domains
+        ):
+            raise ValueError("domains must contain at most 20 valid hostnames")
 
+        params = {
+            "q": query,
+            "language": "en",
+            "sortBy": "publishedAt",
+            "pageSize": limit,
+        }
+        if normalized_domains:
+            params["domains"] = ",".join(normalized_domains)
         response = httpx.get(
             NEWSAPI_EVERYTHING_URL,
-            params={
-                "q": query,
-                "language": "en",
-                "sortBy": "publishedAt",
-                "pageSize": limit,
-            },
+            params=params,
             headers={"X-Api-Key": self.api_key},
             timeout=self.timeout,
         )

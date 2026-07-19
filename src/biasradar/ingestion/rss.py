@@ -7,8 +7,8 @@ from time import struct_time
 import feedparser
 import httpx
 
-from biasradar.ingestion import IngestedItem
-from biasradar.security import validate_public_url, validated_redirect
+from biasradar.common.security import validate_public_url, validated_redirect
+from biasradar.ingestion.models import IngestedItem
 
 MAX_FEED_BYTES = 5_000_000
 TOKEN_PATTERN = re.compile(r"[a-z0-9]+")

@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
-from biasradar.deduplicator import (
+from biasradar.ingestion.deduplication import (
     DeduplicationItem,
     canonicalize_url,
     deduplicate_items,

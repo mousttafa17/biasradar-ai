@@ -1,0 +1,47 @@
+DOMAIN PROFILE: football-v1
+
+Analyze the supplied text as football controversy discourse. Add
+"domain_profile": "football-v1" and a "domain_analysis" object to the generic JSON
+response. The domain_analysis object must have exactly this shape:
+{
+  "controversy_types": ["VAR_decision | penalty_claim | red_card_claim | offside_claim | referee_performance | federation_bias | corruption_allegation | player_media_bias | team_media_bias | fan_narrative | other_football"],
+  "primary_stance": "supports_team | criticizes_team | defends_referee | criticizes_referee | accuses_federation | defends_federation | unclear",
+  "secondary_stances": ["same allowed stance labels"],
+  "content_modes": ["neutral_match_reporting | tactical_analysis"],
+  "framing_tags": ["fan_emotion | conspiracy_claim | loaded_language | institutional_defense | evidence_based_criticism"],
+  "subject_team": "explicit team or null",
+  "opposing_team": "explicit opponent or null",
+  "player": "explicit player or null",
+  "competition": "explicit competition or null",
+  "match": "explicit match context or null",
+  "referee": "explicit referee or null",
+  "federation": "explicit governing body or null",
+  "incidents": [
+    {
+      "controversy_type": "one allowed controversy type",
+      "description": "text-grounded incident description",
+      "match_minute": 0,
+      "on_field_decision": "decision or null",
+      "review_outcome": "VAR/review outcome or null"
+    }
+  ],
+  "attributed_expert_opinions": [
+    {
+      "speaker": "named speaker",
+      "stated_credential": "credential stated in the article or null",
+      "opinion_summary": "faithful summary",
+      "direct_quote": "short exact quote or null"
+    }
+  ]
+}
+
+Keep dimensions separate. A report can criticize a referee, support a team, use fan
+emotion, and contain tactical analysis simultaneously. Use primary_stance for the most
+central expressed position and secondary_stances for other explicit positions.
+
+Do not treat a referee decision, federation explanation, pundit view, or fan claim as
+independently verified. Classify accusations of rigging, corruption, secret plans, or
+intentional favoritism as allegations/conspiracy framing unless the supplied text
+contains direct evidence. Extract expert opinions only when a named person and their
+view appear in the text; never invent credentials or consensus. Use null and empty
+arrays for information not present in the article.

@@ -1,8 +1,14 @@
-# BiasRadar AI
+# BiasRadar Football
 
-BiasRadar AI is a Python CLI for monitoring media discourse around a topic. It
-collects recent coverage, extracts readable article text, evaluates observable stance
-and framing, and identifies claims for later fact-checking.
+BiasRadar Football is the first product profile of BiasRadar AI. The MVP monitors
+football controversies—including referee and VAR decisions, federation-favoritism
+claims, player/team media framing, and fan narratives. It collects coverage, evaluates
+observable stance and framing, separates facts from opinions and allegations, and
+reports where the current independently collected narrative lies.
+
+The core remains domain-neutral. Ingestion, evidence, claims, scheduling, storage, and
+API boundaries use generic contracts; football-specific taxonomies and instructions
+are provided by the `football-v1` domain profile so other profiles can be added later.
 
 The project is designed to describe what published material says and how it says it.
 It must not infer hidden intent or present unsupported conclusions about a person,
@@ -80,6 +86,42 @@ desired winners, or intentional favoritism as allegations unless the supplied ar
 contains strong direct evidence. This stage extracts claims; it does not yet verify
 them against external evidence.
 
+### Football domain profile
+
+`DOMAIN_PROFILE=football-v1` appends a versioned football prompt and validates a
+football-specific `domain_analysis` payload without changing the shared article,
+claim, or evidence contracts.
+
+Football stance is multi-dimensional rather than one flat label:
+
+- Team stance: `supports_team`, `criticizes_team`
+- Referee stance: `defends_referee`, `criticizes_referee`
+- Federation stance: `accuses_federation`, `defends_federation`
+- Fallback: `unclear`
+- Content modes: `neutral_match_reporting`, `tactical_analysis`
+- Framing: `fan_emotion`, `conspiracy_claim`, `loaded_language`,
+  `institutional_defense`, `evidence_based_criticism`
+
+Supported controversy types are `VAR_decision`, `penalty_claim`, `red_card_claim`,
+`offside_claim`, `referee_performance`, `federation_bias`,
+`corruption_allegation`, `player_media_bias`, `team_media_bias`, `fan_narrative`,
+and `other_football`. The profile also extracts text-grounded teams, players,
+competition, match, referee, federation, incidents, and attributed expert opinions.
+Missing details remain null; credentials, consensus, decisions, and intent must never
+be invented.
+
+The profile registry currently contains `generic-v1` and `football-v1`. A profile owns
+only its schema, prompt, labels, and prompt version. Core services remain reusable for
+future domains.
+
+Current analysis versions persist both `domain_profile` and the validated
+`domain_analysis` JSON object. Topic reports expose a football-specific stance
+distribution, controversy/content/framing counts, mentioned teams and officials,
+and attributed-expert counts. Report wording distinguishes the leading classified
+narrative from evidence-backed findings; a claim is stated as supported or
+contradicted only when a repeated claim cluster has sufficiently confident stored
+evidence and at least one evidence URL.
+
 ## Requirements
 
 - Python 3.13+
@@ -107,6 +149,11 @@ supabase/migrations/202607180003_versioned_analysis.sql
 supabase/migrations/202607180004_fact_checking.sql
 supabase/migrations/202607180005_source_deduplication.sql
 supabase/migrations/202607180006_multichannel_ingestion.sql
+supabase/migrations/202607180007_pipeline_runs.sql
+supabase/migrations/202607190008_topic_viability.sql
+supabase/migrations/202607190009_topic_intake_queue.sql
+supabase/migrations/202607190010_evidence_review.sql
+supabase/migrations/202607190011_domain_analysis.sql
 ```
 
 You can apply them with your normal Supabase migration workflow or paste them into the
@@ -129,10 +176,13 @@ NEWSAPI_KEY=your-newsapi-key
 OPENAI_API_KEY=github_pat_your-token
 OPENAI_BASE_URL=https://models.github.ai/inference
 OPENAI_MODEL=openai/gpt-4.1-mini
+DOMAIN_PROFILE=football-v1
 
 GOOGLE_FACT_CHECK_API_KEY=
 RSS_FEED_URLS=https://example.com/feed.xml,https://example.org/atom.xml
+PRIMARY_SOURCE_DOMAINS=who.int,sec.gov,fifa.com
 API_CORS_ORIGINS=http://localhost:3000
+API_TOPIC_RATE_LIMIT=10
 # Reserved for later stages.
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
@@ -157,6 +207,22 @@ List active topics:
 ```bash
 uv run biasradar topics
 ```
+
+Assess a user-submitted topic before monitoring it:
+
+```bash
+uv run biasradar assess-topic \
+  "Is mainstream media unfairly portraying nuclear energy?" \
+  --probe-limit 20
+```
+
+Topic intake normalizes the query, probes bounded NewsAPI and configured RSS
+coverage, counts independent sources and channels, checks active topics for strong
+token overlap, and requests a structured neutral definition from the configured
+model. The model cannot override duplicate detection or the minimum threshold of five
+coverage items from three independent sources. Results are one of `accepted`,
+`needs_clarification`, `insufficient_coverage`, `too_broad`, `too_narrow`, `unsafe`,
+or `duplicate_topic`. Only `accepted` assessments atomically create an active topic.
 
 Fetch and analyze up to five articles:
 
@@ -201,6 +267,23 @@ uv run biasradar verify-evidence \
 Use `--force` only when intentionally refreshing evidence already processed by the
 current evidence method.
 
+Discover primary-evidence candidates from an explicit official-domain allow-list:
+
+```bash
+uv run biasradar discover-primary-evidence \
+  "Media framing of nuclear energy policy" \
+  --domain iaea.org \
+  --domain energy.gov \
+  --days 90 \
+  --claim-limit 10
+```
+
+Discovery is claim-driven and topic-agnostic. It searches only explicitly configured
+official hostnames, excludes the article that produced the claim, downloads documents
+through the SSRF-safe cleaner, hashes their content, and stores model-proposed source
+roles, relationships, relevance, excerpts, and reasoning for review. Discovery never
+turns a candidate into a final verdict by itself.
+
 Normalize sources and group syndicated copies explicitly (reporting also runs this
 step automatically):
 
@@ -222,6 +305,25 @@ Generate and save a 30-day topic report:
 uv run biasradar report "Argentina FIFA Favoritism" --days 30
 ```
 
+Run the complete daily topic pipeline:
+
+```bash
+uv run biasradar run-topic \
+  "Argentina FIFA Favoritism" \
+  --days 30 \
+  --news-limit 20 \
+  --rss-limit 20
+```
+
+`run-topic` fetches NewsAPI and configured RSS entries, stores and analyzes new
+content, normalizes syndicated groups, and creates one report snapshot. Its daily key
+also contains the lookback, prompt version, and model ID. A completed retry returns
+the existing report, a failed retry resumes the same audit record, and PostgreSQL
+prevents concurrent active runs for one topic. `pipeline_runs` stores bounded counters,
+provider failures, versions, timestamps, status, and the generated report ID.
+Active jobs renew a database lease; an abandoned run can be reclaimed after 30
+minutes instead of blocking that topic permanently.
+
 ### Read API
 
 Start the FastAPI read server locally:
@@ -235,8 +337,17 @@ The initial frontend contract exposes:
 - `GET /health`
 - `GET /topics?limit=20&offset=0`
 - `GET /topics/{topic_id}/overview?days=30`
+- `GET /topics/{topic_id}/reports?days=365&limit=50&offset=0`
+- `GET /topics/{topic_id}/reports/{report_id}`
+- `GET /topics/{topic_id}/timeline?days=365&limit=365`
 - `GET /docs` for interactive OpenAPI documentation
 - `GET /openapi.json` for the machine-readable contract
+- `POST /topic-submissions`
+- `GET /topic-submissions/{submission_id}`
+- `POST /topic-submissions/{submission_id}/retry`
+- `GET /claims/{claim_id}/evidence`
+- `GET /review/evidence?status=pending`
+- `POST /review/evidence/{candidate_id}/decision`
 
 The server binds to `127.0.0.1:8000` by default. `API_CORS_ORIGINS` is a
 comma-separated allow-list of exact frontend origins; wildcards, paths, queries, and
@@ -244,6 +355,33 @@ insecure non-local origins are rejected. The repository offers read operations o
 response models allow-list public fields, query windows are bounded, and database
 errors are sanitized. The service-role credential remains server-side and must never
 be added to frontend environment variables.
+
+Topic-intake routes require a valid Supabase access token in `Authorization: Bearer
+<token>`. Submission requests also require an `Idempotency-Key` header containing
+8-200 letters, digits, periods, underscores, colons, or hyphens. Ownership is always
+derived from the verified token, never from request JSON. Persistent hourly limits
+apply independently to the authenticated user and direct client IP. Submission calls
+only enqueue work and return `202`; they never invoke NewsAPI or the model inline.
+
+Run an intake worker from a trusted backend process or scheduler:
+
+```bash
+uv run biasradar process-topic-submissions --limit 10 --probe-limit 20
+```
+
+Workers claim rows atomically with `FOR UPDATE SKIP LOCKED`, lease each claim for 30
+minutes, retry transient failures with bounded exponential backoff, and mark the third
+failed attempt terminal. Only the submission owner can read its status or retry a
+terminally failed submission.
+
+Public evidence reads expose only human-approved candidate provenance and bounded
+excerpts. Pending, rejected, and needs-more-evidence records remain in the authenticated
+review queue. Review routes require
+the `evidence_reviewer` role in immutable Supabase `app_metadata`; user-editable
+metadata is never trusted. Automated assessments are immutable by method/model version,
+while every human decision is appended to `evidence_reviews`. A review may approve,
+reject, or request more evidence and can correct the source role, relationship,
+excerpt, verdict, confidence, and notes without overwriting the automated record.
 
 The limit must be between 1 and 100. NewsAPI results are requested in English and
 ordered by publication time.
@@ -411,6 +549,15 @@ The current slice reads or writes these tables:
 - `claims`: claims linked to both an article and an exact analysis version.
 - `claim_checks`: normalized verdicts and complete published-review evidence.
 - `topic_reports`: deterministic percentages and frontend-ready report JSON.
+- `pipeline_runs`: idempotent run state, counters, versions, failures, and report
+  provenance.
+- `topic_submissions`: normalized user intake and gateway status.
+- `topic_viability_assessments`: coverage signals, structured scope, competing frames,
+  clarification questions, model version, and decision rationale.
+- `topic_intake_rate_limits`: persistent, privacy-preserving user/IP request counters.
+- `evidence_candidates`: claim-linked URLs, provenance, hashes, and review state.
+- `evidence_automated_assessments`: immutable versioned model relationships and excerpts.
+- `evidence_reviews`: append-only authenticated human decisions and corrections.
 
 ## Project structure
 
@@ -418,25 +565,20 @@ The current slice reads or writes these tables:
 biasradar-ai/
 ├── src/biasradar/
 │   ├── config.py            # Environment-backed settings
-│   ├── api.py               # FastAPI routes and response boundary
-│   ├── api_models.py        # Strict public response models
-│   ├── api_repository.py    # Narrow read-only Supabase access
-│   ├── api_server.py        # Local Uvicorn entry point
-│   ├── db.py                # Supabase reads, schema checks, and persistence
-│   ├── security.py          # SSRF and untrusted-URL validation
-│   ├── news_fetcher.py      # NewsAPI client and article models
-│   ├── ingestion.py         # Provider-neutral content contract
-│   ├── rss_fetcher.py       # Safe RSS/Atom provider adapter
-│   ├── article_cleaner.py   # Page download and Trafilatura extraction
-│   ├── analyzer.py          # GitHub Models client and validated AI output
-│   ├── fact_checker.py      # Google ClaimReview search and verdict normalization
-│   ├── evidence_verifier.py # Atomic claims and evidence comparison
-│   ├── deduplicator.py      # Source normalization and content-chain grouping
-│   ├── report_generator.py  # Deterministic aggregation and report models
-│   ├── telegram_client.py   # Placeholder for Telegram delivery
-│   └── cli.py               # Typer commands and workflow orchestration
+│   ├── analysis/            # Article analysis and topic viability
+│   ├── api/                 # FastAPI app, public models, repository, and server
+│   ├── cli/                 # Typer application and command orchestration
+│   ├── common/              # Shared security and URL validation
+│   ├── domains/             # Generic profiles and football-v1 schema
+│   ├── evidence/            # Fact checks, verification, and primary sources
+│   ├── ingestion/           # Provider models, NewsAPI, RSS, cleaning, deduplication
+│   ├── integrations/        # Optional outbound delivery integrations
+│   ├── persistence/         # Supabase reads, schema checks, and writes
+│   ├── reporting/           # Deterministic aggregation and report models
+│   └── workflows/           # Pipeline identity and asynchronous topic intake
 ├── prompts/
 │   ├── stance_classifier.txt
+│   ├── football_controversy.txt
 │   ├── fact_checker.txt
 │   ├── evidence_verifier.txt
 │   └── report_generator.txt

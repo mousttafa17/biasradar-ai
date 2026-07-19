@@ -7,7 +7,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from biasradar.analyzer import FramingTag, StanceLabel
+from biasradar.analysis.analyzer import FramingTag, StanceLabel
+from biasradar.domains.football import FootballAnalysis, FootballStance
 
 
 class ConfidenceLevel(StrEnum):
@@ -28,6 +29,8 @@ class AnalyzedItem(BaseModel):
     is_group_origin: bool | None = None
     source_name: str
     source_type: str = "news"
+    domain_profile: str = "generic-v1"
+    domain_analysis: dict[str, object] = Field(default_factory=dict)
     stance: StanceLabel
     framing_tags: list[FramingTag] = Field(default_factory=list)
     stance_confidence: float = Field(ge=0, le=1)
@@ -83,11 +86,47 @@ class ClaimCluster(BaseModel):
     evidence_urls: list[str] = Field(default_factory=list)
 
 
+class FootballReportSummary(BaseModel):
+    """Deterministic football-v1 dimensions for frontend report components."""
+
+    analyzed_items: int
+    stance_distribution: dict[str, float]
+    controversy_type_counts: dict[str, int]
+    content_mode_counts: dict[str, int]
+    framing_tag_counts: dict[str, int]
+    teams: dict[str, int]
+    referees: dict[str, int]
+    federations: dict[str, int]
+    attributed_expert_opinions: int
+
+    @property
+    def narrative_sentence(self) -> str:
+        if not self.stance_distribution:
+            return "No football-specific narrative classification was available."
+        stance, share = max(self.stance_distribution.items(), key=lambda item: item[1])
+        labels = {
+            FootballStance.SUPPORTS_TEAM: "supported or defended the subject team",
+            FootballStance.CRITICIZES_TEAM: "criticized the subject team",
+            FootballStance.DEFENDS_REFEREE: "defended the referee or decision",
+            FootballStance.CRITICIZES_REFEREE: "criticized the referee or decision",
+            FootballStance.ACCUSES_FEDERATION: "accused the federation of favoritism",
+            FootballStance.DEFENDS_FEDERATION: "defended the federation",
+            FootballStance.UNCLEAR: "had no clear football-specific stance",
+        }
+        if share < 50:
+            return "Football-specific coverage was split without a majority narrative."
+        return (
+            f"The leading football narrative, representing {share:.1f}% of weighted "
+            f"football coverage, {labels[FootballStance(stance)]}."
+        )
+
+
 class TopicReport(BaseModel):
     """Frontend-ready deterministic report for one topic and period."""
 
     topic_id: str
     topic_name: str
+    domain_profile: str = "generic-v1"
     period_start: datetime
     period_end: datetime
     total_items: int
@@ -106,6 +145,8 @@ class TopicReport(BaseModel):
     framing_tag_counts: dict[str, int]
     repeated_claim_clusters: list[ClaimCluster]
     fact_check_summary: dict[str, int]
+    verified_findings: list[str] = Field(default_factory=list)
+    football_summary: FootballReportSummary | None = None
     confidence_score: float = Field(ge=0, le=1)
     confidence_level: ConfidenceLevel
     methodology: str
@@ -138,7 +179,7 @@ class TopicReport(BaseModel):
                 "The deterministic framing-bias index was "
                 f"{abs(self.overall_bias_score):.1f}/100 {bias_direction}."
             )
-        return (
+        base = (
             f"Based on {self.total_items} collected items from {self.source_count} "
             f"sources representing {self.independent_content_groups} independent "
             f"content groups, {direction} {bias_sentence} "
@@ -147,6 +188,17 @@ class TopicReport(BaseModel):
             f"claim clusters and {sum(self.fact_check_summary.values())} stored "
             "fact-check results."
         )
+        football = (
+            f" {self.football_summary.narrative_sentence}"
+            if self.football_summary
+            else ""
+        )
+        findings = (
+            " Evidence-backed findings: " + " ".join(self.verified_findings)
+            if self.verified_findings
+            else " No evidence-backed consensus finding is available yet."
+        )
+        return base + football + findings
 
 
 STANCE_KEYS = tuple(label.value for label in StanceLabel)
@@ -183,6 +235,95 @@ STOP_WORDS = {
 
 def _round_percent(value: float) -> float:
     return round(value * 100 + 1e-9, 1)
+
+
+def _closed_distribution(weights: dict[str, float]) -> dict[str, float]:
+    total = sum(weights.values())
+    if not total:
+        return dict.fromkeys(weights, 0.0)
+    distribution = {
+        key: _round_percent(value / total) for key, value in weights.items()
+    }
+    largest_key = max(weights, key=lambda key: weights[key])
+    distribution[largest_key] = round(
+        distribution[largest_key] + 100 - sum(distribution.values()), 1
+    )
+    return distribution
+
+
+def _football_summary(
+    items: list[AnalyzedItem], base_weights: list[float]
+) -> FootballReportSummary | None:
+    football_items: list[tuple[AnalyzedItem, FootballAnalysis, float]] = []
+    for item, base_weight in zip(items, base_weights, strict=True):
+        if item.domain_profile == "football-v1":
+            football_items.append(
+                (
+                    item,
+                    FootballAnalysis.model_validate(item.domain_analysis),
+                    base_weight,
+                )
+            )
+    if not football_items:
+        return None
+
+    stance_weights = dict.fromkeys((stance.value for stance in FootballStance), 0.0)
+    for item, analysis, base_weight in football_items:
+        stance_weights[analysis.primary_stance.value] += (
+            item.stance_confidence * base_weight
+        )
+
+    return FootballReportSummary(
+        analyzed_items=len(football_items),
+        stance_distribution=_closed_distribution(stance_weights),
+        controversy_type_counts=dict(
+            Counter(
+                value.value
+                for _, analysis, _ in football_items
+                for value in analysis.controversy_types
+            )
+        ),
+        content_mode_counts=dict(
+            Counter(
+                value.value
+                for _, analysis, _ in football_items
+                for value in analysis.content_modes
+            )
+        ),
+        framing_tag_counts=dict(
+            Counter(
+                value.value
+                for _, analysis, _ in football_items
+                for value in analysis.framing_tags
+            )
+        ),
+        teams=dict(
+            Counter(
+                team
+                for _, analysis, _ in football_items
+                for team in (analysis.subject_team, analysis.opposing_team)
+                if team
+            )
+        ),
+        referees=dict(
+            Counter(
+                analysis.referee
+                for _, analysis, _ in football_items
+                if analysis.referee
+            )
+        ),
+        federations=dict(
+            Counter(
+                analysis.federation
+                for _, analysis, _ in football_items
+                if analysis.federation
+            )
+        ),
+        attributed_expert_opinions=sum(
+            len(analysis.attributed_expert_opinions)
+            for _, analysis, _ in football_items
+        ),
+    )
 
 
 def _confidence_level(score: float) -> ConfidenceLevel:
@@ -348,6 +489,7 @@ def aggregate_topic(
     framing_total = 0.0
     evidence_total = 0.0
     metric_weight = 0.0
+    base_weights: list[float] = []
 
     for item, group_key in zip(items, group_keys, strict=True):
         # Channels receive equal total influence. Within a channel, independent
@@ -357,6 +499,7 @@ def aggregate_topic(
             * len(channel_groups[item.source_type])
             * channel_group_frequency[(item.source_type, group_key)]
         )
+        base_weights.append(base_weight)
         weight = item.stance_confidence * base_weight
         stance_weights[item.stance.value] += weight
 
@@ -377,20 +520,7 @@ def aggregate_topic(
             directional_bias_total += direction * framing_intensity * weight
             directional_weight += weight
 
-    total_weight = sum(stance_weights.values())
-    if total_weight:
-        distribution = {
-            key: _round_percent(value / total_weight)
-            for key, value in stance_weights.items()
-        }
-        # Independent rounding can total 99.9 or 100.1. Assign that residual to
-        # the largest category so frontend segments always close at exactly 100%.
-        largest_key = max(stance_weights, key=lambda key: stance_weights[key])
-        distribution[largest_key] = round(
-            distribution[largest_key] + 100 - sum(distribution.values()), 1
-        )
-    else:
-        distribution = dict.fromkeys(STANCE_KEYS, 0.0)
+    distribution = _closed_distribution(stance_weights)
 
     pro_weight = stance_weights[StanceLabel.PRO_SUBJECT]
     anti_weight = stance_weights[StanceLabel.ANTI_SUBJECT]
@@ -439,9 +569,33 @@ def aggregate_topic(
             "content-deduplicated."
         )
 
+    football_summary = _football_summary(items, base_weights)
+    if football_summary and football_summary.analyzed_items < len(items):
+        limitations.append(
+            f"Football-specific metrics cover {football_summary.analyzed_items} of "
+            f"{len(items)} analyzed items; remaining items use a different profile."
+        )
+    repeated_claim_clusters = cluster_repeated_claims(claims or [], checks=claim_checks)
+    verified_findings = []
+    for cluster in repeated_claim_clusters:
+        if (
+            cluster.fact_check_verdict in {"supported", "contradicted"}
+            and (cluster.fact_check_confidence or 0) >= 0.6
+            and cluster.evidence_urls
+        ):
+            verb = (
+                "Evidence supports"
+                if cluster.fact_check_verdict == "supported"
+                else "Evidence contradicts"
+            )
+            verified_findings.append(f"{verb}: {cluster.representative_claim}")
+        if len(verified_findings) == 5:
+            break
+
     return TopicReport(
         topic_id=topic_id,
         topic_name=topic_name,
+        domain_profile="football-v1" if football_summary else "generic-v1",
         period_start=period_start,
         period_end=period_end,
         total_items=len(items),
@@ -460,10 +614,10 @@ def aggregate_topic(
         framing_tag_counts=dict(
             Counter(tag.value for item in items for tag in item.framing_tags)
         ),
-        repeated_claim_clusters=cluster_repeated_claims(
-            claims or [], checks=claim_checks
-        ),
+        repeated_claim_clusters=repeated_claim_clusters,
         fact_check_summary=dict(Counter(check.verdict for check in claim_checks or [])),
+        verified_findings=verified_findings,
+        football_summary=football_summary,
         confidence_score=confidence_score,
         confidence_level=_confidence_level(confidence_score),
         methodology=(

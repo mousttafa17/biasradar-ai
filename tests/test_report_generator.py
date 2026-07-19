@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from biasradar.report_generator import (
+from biasradar.reporting.generator import (
     AnalyzedItem,
     ClaimCheckItem,
     ClaimItem,
@@ -21,6 +21,8 @@ def _item(
     evidence: float = 0.5,
     emotionality: float = 0.5,
     content_group_id: str | None = None,
+    domain_profile: str = "generic-v1",
+    domain_analysis: dict[str, object] | None = None,
 ) -> AnalyzedItem:
     return AnalyzedItem(
         raw_item_id=item_id,
@@ -28,6 +30,8 @@ def _item(
         url=f"https://example.com/{item_id}",
         content_group_id=content_group_id,
         source_name=source,
+        domain_profile=domain_profile,
+        domain_analysis=domain_analysis or {},
         stance=stance,
         stance_confidence=confidence,
         loaded_language_score=loaded,
@@ -35,6 +39,25 @@ def _item(
         evidence_quality_score=evidence,
         emotionality_score=emotionality,
     )
+
+
+def _football_analysis(primary_stance: str) -> dict[str, object]:
+    return {
+        "controversy_types": ["VAR_decision", "referee_performance"],
+        "primary_stance": primary_stance,
+        "secondary_stances": [],
+        "content_modes": ["neutral_match_reporting"],
+        "framing_tags": ["evidence_based_criticism"],
+        "subject_team": "Argentina",
+        "opposing_team": "England",
+        "player": None,
+        "competition": "World Cup",
+        "match": "Argentina v England",
+        "referee": "Example Referee",
+        "federation": "FIFA",
+        "incidents": [],
+        "attributed_expert_opinions": [],
+    }
 
 
 def test_aggregation_calculates_direction_and_bias_deterministically() -> None:
@@ -139,6 +162,86 @@ def test_non_directional_sample_does_not_claim_a_bias_direction() -> None:
     assert report.directional_pro_percent is None
     assert "not available" in report.report_text
     assert "0.0/100 toward" not in report.report_text
+
+
+def test_football_report_aggregates_domain_stances_and_wording() -> None:
+    now = datetime.now(UTC)
+    report = aggregate_topic(
+        topic_id="topic-1",
+        topic_name="Argentina VAR controversy",
+        period_start=now,
+        period_end=now,
+        items=[
+            _item(
+                "1",
+                "Source A",
+                "anti_subject",
+                domain_profile="football-v1",
+                domain_analysis=_football_analysis("criticizes_referee"),
+            ),
+            _item(
+                "2",
+                "Source B",
+                "mixed",
+                domain_profile="football-v1",
+                domain_analysis=_football_analysis("criticizes_referee"),
+            ),
+            _item(
+                "3",
+                "Source C",
+                "neutral",
+                domain_profile="football-v1",
+                domain_analysis=_football_analysis("defends_referee"),
+            ),
+        ],
+    )
+
+    assert report.domain_profile == "football-v1"
+    assert report.football_summary is not None
+    assert report.football_summary.stance_distribution["criticizes_referee"] == 66.7
+    assert report.football_summary.controversy_type_counts["VAR_decision"] == 3
+    assert "leading football narrative" in report.report_text
+    assert "criticized the referee or decision" in report.report_text
+
+
+def test_report_only_calls_evidence_backed_claims_findings() -> None:
+    now = datetime.now(UTC)
+    claims = [
+        ClaimItem(
+            claim_id=f"claim-{index}",
+            analysis_id=f"analysis-{index}",
+            raw_item_id=f"item-{index}",
+            source_name=f"Source {index}",
+            claim_text="The referee awarded the penalty after VAR review",
+            claim_type="verifiable_fact",
+            checkability="checkable",
+            importance_score=0.9,
+        )
+        for index in range(2)
+    ]
+    report = aggregate_topic(
+        topic_id="topic-1",
+        topic_name="VAR controversy",
+        period_start=now,
+        period_end=now,
+        items=[_item("0", "Source 0", "neutral"), _item("1", "Source 1", "neutral")],
+        claims=claims,
+        claim_checks=[
+            ClaimCheckItem(
+                claim_id=claim.claim_id,
+                verdict="supported",
+                confidence=0.9,
+                evidence_summary="Confirmed by the match record.",
+                evidence_urls=["https://example.com/match-record"],
+            )
+            for claim in claims
+        ],
+    )
+
+    assert report.verified_findings == [
+        "Evidence supports: The referee awarded the penalty after VAR review"
+    ]
+    assert "Evidence-backed findings:" in report.report_text
 
 
 def test_repeated_claims_cluster_across_distinct_articles() -> None:

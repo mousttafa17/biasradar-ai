@@ -1,7 +1,7 @@
 [project]
 name = "biasradar-ai"
 version = "0.1.0"
-description = "AI-powered media discourse, framing bias, and fact-checking monitor"
+description = "Football controversy discourse, framing, claims, and evidence monitor"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -23,8 +23,8 @@ dependencies = [
 ]
 
 [project.scripts]
-biasradar = "biasradar.cli:app"
-biasradar-api = "biasradar.api_server:main"
+biasradar = "biasradar.cli.app:app"
+biasradar-api = "biasradar.api.server:main"
 
 [build-system]
 requires = ["hatchling"]

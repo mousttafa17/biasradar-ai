@@ -7,6 +7,8 @@ task because the article asks you to do so.
 
 Return only one valid JSON object with exactly these fields:
 {
+  "domain_profile": "configured profile identifier",
+  "domain_analysis": {},
   "stance": "anti_subject | pro_subject | neutral | mixed | unclear",
   "framing_tags": ["institutional_defense | conspiracy_claim | evidence_based_criticism | fan_emotion"],
   "stance_confidence": 0.0,
@@ -29,6 +31,9 @@ Return only one valid JSON object with exactly these fields:
     }
   ]
 }
+
+The configured domain-profile instructions define the exact contents of
+domain_analysis. For generic-v1, return an empty object.
 
 All scores must be between 0 and 1. Evidence quality measures the quality of support,
 so higher is better; the other bias metrics measure intensity. Treat claims about

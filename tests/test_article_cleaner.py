@@ -1,5 +1,5 @@
-from biasradar.article_cleaner import ArticleCleaner
-from biasradar.security import UnsafeURLError
+from biasradar.common.security import UnsafeURLError
+from biasradar.ingestion.cleaner import ArticleCleaner
 
 
 def test_cleaner_extracts_main_text(monkeypatch) -> None:

@@ -1,6 +1,6 @@
 import httpx
 
-from biasradar.fact_checker import (
+from biasradar.evidence.fact_checker import (
     FactCheckVerdict,
     GoogleFactChecker,
     interpret_search_results,
