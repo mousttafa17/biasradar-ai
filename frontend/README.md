@@ -40,13 +40,31 @@ The first fixture-backed animated report is available at:
 http://localhost:3000/topics/demo
 ```
 
+Real topic UUIDs load stored report data from FastAPI on the Next.js server:
+
+```text
+http://localhost:3000/topics/11111111-1111-4111-8111-111111111111
+```
+
+The overview, incident, narrative, and timeline requests run concurrently. Responses
+are validated before rendering; missing reports use the route's not-found state and
+upstream or malformed responses use its sanitized error boundary.
+
 Never place a Supabase secret key in this frontend or in a `NEXT_PUBLIC_*`
 variable. Browser requests go through the allow-listed FastAPI contract.
 
-The report route uses TypeScript contracts matching the FastAPI overview, incident,
-narrative, and timeline responses. Its fixture is intentionally isolated in
-`src/lib/fixtures` so live API fetching can replace it without changing the visual
-components.
+The report route uses TypeScript contracts and Zod schemas matching the FastAPI
+overview, incident, narrative, and timeline responses. The demo fixture remains
+isolated in `src/lib/fixtures` and never makes a network request.
+
+Run frontend checks with:
+
+```bash
+npm run lint
+npx tsc --noEmit
+npm test
+npm run build
+```
 
 ## Learn More
 

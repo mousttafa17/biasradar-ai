@@ -26,7 +26,9 @@ export function ReportDashboard({
   topicId: string;
 }) {
   const { overview, incidents, narratives, timeline } = fixture;
-  const [activeIncident, setActiveIncident] = useState(incidents.items[0].incident_id);
+  const [activeIncident, setActiveIncident] = useState(
+    incidents.items[0]?.incident_id ?? "",
+  );
   const currentIncident =
     incidents.items.find((item) => item.incident_id === activeIncident) ?? incidents.items[0];
 
@@ -50,12 +52,19 @@ export function ReportDashboard({
           </section>
 
           <NarrativeSection metrics={narratives.metrics} channels={overview.channel_counts} />
-          <IncidentSection
-            incidents={incidents.items}
-            activeIncident={activeIncident}
-            onSelect={setActiveIncident}
-            currentIncident={currentIncident}
-          />
+          {currentIncident ? (
+            <IncidentSection
+              incidents={incidents.items}
+              activeIncident={activeIncident}
+              onSelect={setActiveIncident}
+              currentIncident={currentIncident}
+            />
+          ) : (
+            <EmptyReportSection
+              title="No incidents extracted yet"
+              description="The report is available, but no football incidents met the extraction threshold in this period."
+            />
+          )}
           <TimelineSection points={timeline.points} />
           <ConsensusSection consensus={narratives.consensus[0]} />
           <FindingsSection fixture={fixture} />
@@ -297,6 +306,14 @@ function IncidentSection({ incidents, activeIncident, onSelect, currentIncident 
 }
 
 function TimelineSection({ points }: { points: TimelinePoint[] }) {
+  if (points.length === 0) {
+    return (
+      <EmptyReportSection
+        title="Narrative history is still forming"
+        description="A timeline will appear after at least one report snapshot has been stored."
+      />
+    );
+  }
   const path = points.map((point, index) => {
     const x = 42 + index * (516 / Math.max(points.length - 1, 1));
     const y = 180 - ((point.against_percent ?? 50) / 100) * 130;
@@ -504,6 +521,26 @@ function Decision({ label, value }: { label: string; value: string }) {
 
 function LowConfidenceState() {
   return <div className="mt-10 rounded-2xl border border-amber-300/25 bg-amber-300/[0.06] p-5 text-sm text-amber-100">This report has low confidence. Treat the percentages as preliminary until broader independent coverage is available.</div>;
+}
+
+function EmptyReportSection({
+  title,
+  description,
+}: {
+  title: string;
+  description: string;
+}) {
+  return (
+    <section className="pt-28">
+      <Panel className="p-8 text-center">
+        <p className="eyebrow">Insufficient data</p>
+        <h2 className="mt-4 text-2xl font-semibold">{title}</h2>
+        <p className="mx-auto mt-3 max-w-xl text-sm leading-6 text-muted">
+          {description}
+        </p>
+      </Panel>
+    </section>
+  );
 }
 
 function formatLabel(value: string) {

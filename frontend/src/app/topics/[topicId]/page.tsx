@@ -1,16 +1,20 @@
 import type { Metadata } from "next";
+import { notFound } from "next/navigation";
 
 import { ReportDashboard } from "@/components/report-dashboard";
-import { footballReportFixture } from "@/lib/fixtures/football-report";
+import {
+  loadFootballReport,
+  ReportNotFoundError,
+} from "@/lib/report-loader";
 
 type Props = {
   params: Promise<{ topicId: string }>;
 };
 
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
-  await params;
+  const { topicId } = await params;
   return {
-    title: "Disputed semifinal penalty",
+    title: topicId === "demo" ? "Disputed semifinal penalty" : "Topic report",
     description:
       "BiasRadar Football narrative report for the Argentina v England semifinal controversy.",
   };
@@ -18,5 +22,17 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
 
 export default async function TopicReportPage({ params }: Props) {
   const { topicId } = await params;
-  return <ReportDashboard fixture={footballReportFixture} topicId={topicId} />;
+  const report = await loadReportOrNotFound(topicId);
+  return <ReportDashboard fixture={report} topicId={topicId} />;
+}
+
+async function loadReportOrNotFound(topicId: string) {
+  try {
+    return await loadFootballReport(topicId);
+  } catch (error) {
+    if (error instanceof ReportNotFoundError) {
+      notFound();
+    }
+    throw error;
+  }
 }

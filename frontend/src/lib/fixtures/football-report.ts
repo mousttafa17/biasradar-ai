@@ -202,7 +202,7 @@ export const footballReportFixture: FootballReportFixture = {
     consensus: [consensus],
     history: [
       {
-        report_id: "history-1",
+        report_id: "33333333-3333-4333-8333-333333333333",
         timestamp: "2026-07-16T12:00:00Z",
         metrics: [
           { label: "criticizes_referee", percentage: 24, item_count: 7, confidence: 0.56, trend: null },
@@ -210,7 +210,7 @@ export const footballReportFixture: FootballReportFixture = {
         ],
       },
       {
-        report_id: "history-2",
+        report_id: "44444444-4444-4444-8444-444444444444",
         timestamp: "2026-07-18T12:00:00Z",
         metrics: [
           { label: "criticizes_referee", percentage: 32, item_count: 14, confidence: 0.68, trend: 8 },
@@ -231,7 +231,7 @@ export const footballReportFixture: FootballReportFixture = {
     topic_id: topicId,
     points: [
       {
-        report_id: "history-1",
+        report_id: "33333333-3333-4333-8333-333333333333",
         timestamp: "2026-07-16T12:00:00Z",
         toward_percent: 52,
         against_percent: 48,
@@ -241,7 +241,7 @@ export const footballReportFixture: FootballReportFixture = {
         channel_counts: { news: 10, official: 3 },
       },
       {
-        report_id: "history-2",
+        report_id: "44444444-4444-4444-8444-444444444444",
         timestamp: "2026-07-18T12:00:00Z",
         toward_percent: 46,
         against_percent: 54,
