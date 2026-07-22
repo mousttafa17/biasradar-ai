@@ -43,6 +43,9 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = [
+    "staging: opt-in integration tests that write to an isolated Supabase project",
+]
 
 [dependency-groups]
 dev = [

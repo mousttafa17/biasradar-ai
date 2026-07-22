@@ -158,6 +158,7 @@ uv sync --dev
 Apply all migrations in order after reviewing them on a staging Supabase project:
 
 ```text
+supabase/migrations/202607180000_initial_schema.sql
 supabase/migrations/202607180001_secure_analysis_boundary.sql
 supabase/migrations/202607180002_topic_aggregation.sql
 supabase/migrations/202607180003_versioned_analysis.sql
@@ -700,6 +701,35 @@ uv run ruff check .
 uv run pytest
 ```
 
+### Staging integration suite
+
+The default test run remains credential-free. The staging suite performs real writes,
+so use a dedicated Supabase project and explicitly unlock it:
+
+```dotenv
+BIASRADAR_STAGING_URL=https://your-staging-project.supabase.co
+BIASRADAR_STAGING_SERVICE_KEY=your-staging-service-role-key
+BIASRADAR_STAGING_ANON_KEY=your-staging-anon-key
+BIASRADAR_STAGING_ALLOW_WRITES=true
+```
+
+```bash
+uv run pytest -m staging -q
+```
+
+Each test creates uniquely named fixtures and removes them afterward. Do not point
+these variables at production. The suite verifies the complete schema contract,
+service-role and browser-role boundaries, atomic versioned analysis writes,
+concurrent intake and schedule leases, retry backoff, worker heartbeats, idempotent
+pipeline runs, and stored-data responses from the incident and narrative APIs. It
+also checks that service credentials and private analysis reasoning are absent from
+public responses.
+
+The `Staging integration` GitHub Actions workflow starts an isolated local Supabase
+stack and replays every migration from a clean database before running the same
+contract suite. It can run manually and automatically runs on pull requests that
+change application, migration, or integration-test files.
+
 The current test suite covers NewsAPI normalization and secret redaction, article
 extraction and fallback, RSS normalization and filtering, SSRF blocking,
 configuration validation, structured model-response validation, Supabase row
@@ -724,7 +754,8 @@ The following capabilities remain on the roadmap:
 - Semantic claim clustering for paraphrases beyond lexical similarity.
 - Cluster-aware propagation rules for semantically equivalent paraphrases.
 - Telegram report delivery.
-- Full integration tests for NewsAPI, GitHub Models, and Supabase.
+- Live integration tests for NewsAPI and GitHub Models (Supabase is covered by the
+  isolated staging contract suite).
 - Automated deployment and rollback tooling for database migrations.
 
 Extracted claims, model scores, and normalized provider ratings should always be

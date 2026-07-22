@@ -1,0 +1,39 @@
+name: Staging integration
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "src/**"
+      - "supabase/**"
+      - "tests/integration/**"
+      - "pyproject.toml"
+      - "uv.lock"
+
+jobs:
+  supabase-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: supabase/setup-cli@v2
+        with:
+          version: latest
+          github-token: ${{ github.token }}
+      - name: Start isolated Supabase and replay all migrations
+        run: supabase start
+      - name: Install Python dependencies
+        run: uv sync --dev --locked
+      - name: Run staging contract suite against local Supabase
+        shell: bash
+        run: |
+          eval "$(supabase status -o env \
+            --override-name api.url=BIASRADAR_STAGING_URL \
+            --override-name auth.service_role_key=BIASRADAR_STAGING_SERVICE_KEY \
+            --override-name auth.anon_key=BIASRADAR_STAGING_ANON_KEY)"
+          export BIASRADAR_STAGING_URL
+          export BIASRADAR_STAGING_SERVICE_KEY
+          export BIASRADAR_STAGING_ANON_KEY
+          export BIASRADAR_STAGING_ALLOW_WRITES=true
+          uv run pytest -m staging -q
