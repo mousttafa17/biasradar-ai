@@ -4,6 +4,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from biasradar.analysis.consensus import OpinionPosition, SourceRole
+
 
 class FootballControversyType(StrEnum):
     VAR_DECISION = "VAR_decision"
@@ -56,9 +58,15 @@ class AttributedFootballOpinion(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     speaker: str = Field(min_length=1, max_length=200)
+    source_role: SourceRole = SourceRole.UNKNOWN
     stated_credential: str | None = Field(default=None, max_length=300)
+    affiliation: str | None = Field(default=None, max_length=300)
+    is_direct_source: bool = False
     opinion_summary: str = Field(min_length=1, max_length=1_000)
     direct_quote: str | None = Field(default=None, max_length=1_000)
+    incident_ref: str = Field(default="unspecified incident", max_length=500)
+    position: OpinionPosition = OpinionPosition.UNCLEAR
+    position_confidence: float = Field(default=0.5, ge=0, le=1)
 
 
 class FootballAnalysis(BaseModel):

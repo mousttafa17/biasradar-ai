@@ -1,4 +1,4 @@
-from biasradar.ingestion.rss import RSSFetcher
+from biasradar.ingestion.rss import FeedSource, RSSFetcher
 
 
 def test_rss_fetcher_normalizes_and_filters_entries(monkeypatch) -> None:
@@ -31,3 +31,28 @@ def test_rss_fetcher_respects_global_limit(monkeypatch) -> None:
     monkeypatch.setattr(RSSFetcher, "_download", lambda self, url: feed)
 
     assert len(RSSFetcher(["https://example.com/feed.xml"]).fetch("Topic", 1)) == 1
+
+
+def test_rss_preserves_configured_football_provenance(monkeypatch) -> None:
+    feed = b"""<?xml version='1.0'?>
+    <rss version='2.0'><channel><title>FIFA</title>
+    <item><guid>record-1</guid><title>Argentina referee report</title>
+    <link>https://example.com/report</link></item></channel></rss>"""
+    monkeypatch.setattr(RSSFetcher, "_download", lambda self, url: feed)
+
+    item = RSSFetcher(
+        [
+            FeedSource(
+                url="https://example.com/feed.xml",
+                source_type="official",
+                provider="fifa_feed",
+                content_license="Official publication",
+                attribution="FIFA",
+            )
+        ]
+    ).fetch("Argentina referee")[0]
+
+    assert item.source_type == "official"
+    assert item.provider == "fifa_feed"
+    assert item.external_id == "record-1"
+    assert item.attribution == "FIFA"

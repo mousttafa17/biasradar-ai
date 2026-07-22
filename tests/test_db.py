@@ -31,6 +31,9 @@ def test_article_row_matches_raw_items_shape() -> None:
         "published_at": None,
         "raw_text": "Example description",
         "engagement_data": {},
+        "external_id": None,
+        "content_license": None,
+        "attribution": None,
         "language": "en",
         "status": "new",
     }

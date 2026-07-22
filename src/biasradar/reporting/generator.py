@@ -8,6 +8,12 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field
 
 from biasradar.analysis.analyzer import FramingTag, StanceLabel
+from biasradar.analysis.consensus import (
+    ConsensusOpinion,
+    ConsensusResult,
+    ConsensusStatus,
+    build_consensus,
+)
 from biasradar.domains.football import FootballAnalysis, FootballStance
 
 
@@ -91,6 +97,7 @@ class FootballReportSummary(BaseModel):
 
     analyzed_items: int
     stance_distribution: dict[str, float]
+    stance_counts: dict[str, int] = Field(default_factory=dict)
     controversy_type_counts: dict[str, int]
     content_mode_counts: dict[str, int]
     framing_tag_counts: dict[str, int]
@@ -98,6 +105,7 @@ class FootballReportSummary(BaseModel):
     referees: dict[str, int]
     federations: dict[str, int]
     attributed_expert_opinions: int
+    consensus_results: list[ConsensusResult] = Field(default_factory=list)
 
     @property
     def narrative_sentence(self) -> str:
@@ -119,6 +127,18 @@ class FootballReportSummary(BaseModel):
             f"The leading football narrative, representing {share:.1f}% of weighted "
             f"football coverage, {labels[FootballStance(stance)]}."
         )
+
+    @property
+    def consensus_sentence(self) -> str:
+        publishable = [
+            result
+            for result in self.consensus_results
+            if result.status
+            in {ConsensusStatus.STRONG, ConsensusStatus.MODERATE, ConsensusStatus.SPLIT}
+        ]
+        if not publishable:
+            return "No source group met the threshold for a consensus conclusion."
+        return " ".join(result.summary for result in publishable[:3])
 
 
 class TopicReport(BaseModel):
@@ -189,7 +209,8 @@ class TopicReport(BaseModel):
             "fact-check results."
         )
         football = (
-            f" {self.football_summary.narrative_sentence}"
+            f" {self.football_summary.narrative_sentence} "
+            f"{self.football_summary.consensus_sentence}"
             if self.football_summary
             else ""
         )
@@ -273,9 +294,32 @@ def _football_summary(
             item.stance_confidence * base_weight
         )
 
+    consensus_opinions = [
+        ConsensusOpinion(
+            speaker=opinion.speaker,
+            role=opinion.source_role,
+            stated_credential=opinion.stated_credential,
+            affiliation=opinion.affiliation,
+            is_direct_source=opinion.is_direct_source,
+            opinion_summary=opinion.opinion_summary,
+            direct_quote=opinion.direct_quote,
+            incident_ref=opinion.incident_ref,
+            position=opinion.position,
+            position_confidence=opinion.position_confidence,
+            article_id=item.raw_item_id,
+            source_name=item.source_name,
+            content_group_id=item.content_group_id,
+        )
+        for item, analysis, _ in football_items
+        for opinion in analysis.attributed_expert_opinions
+    ]
+
     return FootballReportSummary(
         analyzed_items=len(football_items),
         stance_distribution=_closed_distribution(stance_weights),
+        stance_counts=dict(
+            Counter(analysis.primary_stance.value for _, analysis, _ in football_items)
+        ),
         controversy_type_counts=dict(
             Counter(
                 value.value
@@ -323,6 +367,7 @@ def _football_summary(
             len(analysis.attributed_expert_opinions)
             for _, analysis, _ in football_items
         ),
+        consensus_results=build_consensus(consensus_opinions),
     )
 
 

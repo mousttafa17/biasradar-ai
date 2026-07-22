@@ -28,9 +28,15 @@ response. The domain_analysis object must have exactly this shape:
   "attributed_expert_opinions": [
     {
       "speaker": "named speaker",
+      "source_role": "referee | former_referee | governing_body | club | player | coach | journalist | analyst | fan | unknown",
       "stated_credential": "credential stated in the article or null",
+      "affiliation": "explicit employer, club, federation, or organization or null",
+      "is_direct_source": false,
       "opinion_summary": "faithful summary",
-      "direct_quote": "short exact quote or null"
+      "direct_quote": "short exact quote or null",
+      "incident_ref": "specific incident or claim being judged",
+      "position": "agrees_with_decision | disagrees_with_decision | supports_claim | rejects_claim | mixed | unclear",
+      "position_confidence": 0.0
     }
   ]
 }
@@ -42,6 +48,13 @@ central expressed position and secondary_stances for other explicit positions.
 Do not treat a referee decision, federation explanation, pundit view, or fan claim as
 independently verified. Classify accusations of rigging, corruption, secret plans, or
 intentional favoritism as allegations/conspiracy framing unless the supplied text
-contains direct evidence. Extract expert opinions only when a named person and their
-view appear in the text; never invent credentials or consensus. Use null and empty
-arrays for information not present in the article.
+contains direct evidence. Extract attributed opinions only when a named person or
+organization and its view appear in the text; never invent credentials or consensus.
+Set is_direct_source to true only for the speaker's own statement, interview,
+transcript, or authored analysis; an outlet repeating a quote is not a direct source.
+Use source_role=unknown when the role is not explicit. Keep incident_ref specific and
+consistent with the incident description. Position describes the speaker's judgment,
+not the article's stance. Use null and empty arrays for information not present.
+For a first-person social post, the supplied author may identify the speaker and
+source_role may be fan when the source_type is social; do not infer professional
+credentials from a username, subreddit, popularity, or engagement counts.

@@ -41,7 +41,9 @@ def _item(
     )
 
 
-def _football_analysis(primary_stance: str) -> dict[str, object]:
+def _football_analysis(
+    primary_stance: str, opinions: list[dict[str, object]] | None = None
+) -> dict[str, object]:
     return {
         "controversy_types": ["VAR_decision", "referee_performance"],
         "primary_stance": primary_stance,
@@ -56,7 +58,7 @@ def _football_analysis(primary_stance: str) -> dict[str, object]:
         "referee": "Example Referee",
         "federation": "FIFA",
         "incidents": [],
-        "attributed_expert_opinions": [],
+        "attributed_expert_opinions": opinions or [],
     }
 
 
@@ -202,6 +204,50 @@ def test_football_report_aggregates_domain_stances_and_wording() -> None:
     assert report.football_summary.controversy_type_counts["VAR_decision"] == 3
     assert "leading football narrative" in report.report_text
     assert "criticized the referee or decision" in report.report_text
+
+
+def test_football_report_exposes_qualified_consensus_separately() -> None:
+    now = datetime.now(UTC)
+
+    def opinion(speaker: str) -> dict[str, object]:
+        return {
+            "speaker": speaker,
+            "source_role": "former_referee",
+            "stated_credential": "Former international referee",
+            "affiliation": None,
+            "is_direct_source": True,
+            "opinion_summary": "The penalty decision was incorrect.",
+            "direct_quote": None,
+            "incident_ref": "72nd-minute penalty decision",
+            "position": "disagrees_with_decision",
+            "position_confidence": 0.9,
+        }
+
+    report = aggregate_topic(
+        topic_id="topic-1",
+        topic_name="Penalty controversy",
+        period_start=now,
+        period_end=now,
+        items=[
+            _item(
+                str(index),
+                f"Source {index}",
+                "anti_subject",
+                domain_profile="football-v1",
+                domain_analysis=_football_analysis(
+                    "criticizes_referee", [opinion(f"Referee {index}")]
+                ),
+            )
+            for index in range(3)
+        ],
+    )
+
+    assert report.football_summary is not None
+    consensus = report.football_summary.consensus_results[0]
+    assert consensus.source_group == "officiating_expert"
+    assert consensus.status == "strong_consensus"
+    assert consensus.independent_opinions == 3
+    assert "Strong officiating expert consensus" in report.report_text
 
 
 def test_report_only_calls_evidence_backed_claims_findings() -> None:

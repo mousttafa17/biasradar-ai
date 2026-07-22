@@ -1,7 +1,10 @@
 """Command-line interface for BiasRadar AI."""
 
+import socket
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
+from uuid import uuid4
 
 import typer
 from openai import APIConnectionError, APIStatusError, RateLimitError
@@ -30,9 +33,10 @@ from biasradar.evidence.verifier import (
 )
 from biasradar.ingestion.cleaner import ArticleCleaner
 from biasradar.ingestion.deduplication import deduplicate_items
-from biasradar.ingestion.newsapi import NewsAPIError, NewsFetcher
+from biasradar.ingestion.newsapi import NewsFetcher
 from biasradar.ingestion.rss import RSSFetcher, RSSFetchError
 from biasradar.persistence.repository import (
+    ClaimedTopicSchedule,
     begin_pipeline_run,
     check_database_schema,
     claim_topic_submissions,
@@ -44,6 +48,7 @@ from biasradar.persistence.repository import (
     get_supabase,
     heartbeat_pipeline_run,
     insert_articles,
+    list_topic_schedules,
     load_analyzed_items,
     load_checked_claim_ids,
     load_claim_checks,
@@ -56,10 +61,17 @@ from biasradar.persistence.repository import (
     save_deduplication,
     save_primary_evidence_candidate,
     save_topic_report,
+    upsert_topic_schedule,
+    worker_is_healthy,
 )
 from biasradar.reporting.generator import aggregate_topic, cluster_repeated_claims
+from biasradar.workflows.content_ingestion import (
+    collect_topic_content,
+    configured_content_providers,
+)
 from biasradar.workflows.pipeline import daily_run_key
 from biasradar.workflows.topic_intake import assess_topic_submission
+from biasradar.workflows.worker import process_worker_cycle
 
 app = typer.Typer(help="BiasRadar AI — media discourse and fact-checking monitor")
 console = Console()
@@ -117,7 +129,9 @@ def topics() -> None:
 @app.command()
 def analyze(
     topic: str = typer.Argument(..., help="Topic or search phrase to fetch."),
-    limit: int = typer.Option(5, min=1, max=100, help="Maximum articles to fetch."),
+    limit: int = typer.Option(
+        5, min=1, max=100, help="Maximum results per configured provider."
+    ),
 ) -> None:
     """Fetch, store, clean, and analyze recent articles."""
 
@@ -128,16 +142,17 @@ def analyze(
 
     console.print(f"[bold green]Fetching articles for:[/bold green] {topic}")
     try:
-        articles = NewsFetcher(settings.newsapi_key).fetch(topic, limit)
-    except NewsAPIError as error:
-        console.print(f"[red]NewsAPI request failed:[/red] {error}")
-        raise typer.Exit(code=1) from error
+        ingestion = collect_topic_content(settings, topic, limit)
+        articles = ingestion.items
     except ValueError as error:
-        console.print(f"[red]Invalid NewsAPI query:[/red] {error}")
+        console.print(f"[red]Invalid ingestion request:[/red] {error}")
         raise typer.Exit(code=2) from error
     except Exception as error:
-        console.print("[red]NewsAPI request failed:[/red] connection error")
+        console.print("[red]Content ingestion failed:[/red] no provider was available")
         raise typer.Exit(code=1) from error
+
+    for provider_error in ingestion.provider_errors:
+        console.print(f"[yellow]{provider_error}[/yellow]")
 
     table = Table("#", "Title", "URL", show_lines=True)
     for index, article in enumerate(articles, start=1):
@@ -145,7 +160,9 @@ def analyze(
     if articles:
         console.print(table)
     else:
-        console.print("[yellow]NewsAPI returned no articles.[/yellow]")
+        console.print(
+            "[yellow]Configured providers returned no matching items.[/yellow]"
+        )
 
     try:
         supabase = get_supabase(settings)
@@ -186,7 +203,14 @@ def analyze(
             text = cleaner.clean(str(article.url), article.raw_text)
             if not text:
                 raise ValueError("no article text could be extracted")
-            result = analyzer.analyze(topic, article.title, text)
+            result = analyzer.analyze(
+                topic,
+                article.title,
+                text,
+                source_name=article.source_name,
+                source_type=article.source_type,
+                author=article.author,
+            )
             save_analysis(
                 supabase,
                 raw_item_id=stored.raw_item_id,
@@ -280,7 +304,14 @@ def ingest_rss(
             text = cleaner.clean(str(stored.article.url), stored.article.raw_text)
             if not text:
                 raise ValueError("no article text could be extracted")
-            result = analyzer.analyze(topic, stored.article.title, text)
+            result = analyzer.analyze(
+                topic,
+                stored.article.title,
+                text,
+                source_name=stored.article.source_name,
+                source_type=stored.article.source_type,
+                author=stored.article.author,
+            )
             save_analysis(
                 supabase,
                 raw_item_id=stored.raw_item_id,
@@ -367,18 +398,14 @@ def run_topic(
             )
             return
 
-        articles = []
-        try:
-            articles.extend(NewsFetcher(settings.newsapi_key).fetch(topic, news_limit))
-        except Exception:
-            provider_errors.append("NewsAPI ingestion failed")
-        if settings.configured_rss_feeds:
-            try:
-                articles.extend(
-                    RSSFetcher(settings.configured_rss_feeds).fetch(topic, rss_limit)
-                )
-            except Exception:
-                provider_errors.append("RSS ingestion failed")
+        ingestion = collect_topic_content(
+            settings,
+            topic,
+            rss_limit,
+            provider_limits={"NewsAPI": news_limit, "RSS/Atom": rss_limit},
+        )
+        articles = ingestion.items
+        provider_errors.extend(ingestion.provider_errors)
         counters["fetched"] = len(articles)
         insert_summary, stored = insert_articles(
             supabase, articles, str(topic_row["id"])
@@ -401,7 +428,14 @@ def run_topic(
                 )
                 if not text:
                     raise ValueError("no article text could be extracted")
-                result = analyzer.analyze(topic, candidate.article.title, text)
+                result = analyzer.analyze(
+                    topic,
+                    candidate.article.title,
+                    text,
+                    source_name=candidate.article.source_name,
+                    source_type=candidate.article.source_type,
+                    author=candidate.article.author,
+                )
                 save_analysis(
                     supabase,
                     raw_item_id=candidate.raw_item_id,
@@ -609,6 +643,122 @@ def process_topic_submissions(
     console.print(f"Failed/retried: [red]{failed}[/red]")
 
 
+@app.command("schedule-topic")
+def schedule_topic(
+    topic: str = typer.Argument(..., help="Stored active topic name."),
+    every_minutes: int = typer.Option(1440, min=1440, max=10080),
+    days: int = typer.Option(30, min=1, max=3650),
+    news_limit: int = typer.Option(20, min=1, max=100),
+    rss_limit: int = typer.Option(20, min=1, max=100),
+) -> None:
+    """Create or update a durable daily-or-slower topic schedule."""
+
+    settings = get_settings()
+    client = get_supabase(settings)
+    topic_row = find_topic(client, topic)
+    if not topic_row:
+        console.print(f"[red]Topic not found:[/red] {topic}")
+        raise typer.Exit(code=1)
+    schedule_id = upsert_topic_schedule(
+        client,
+        topic_id=str(topic_row["id"]),
+        interval_minutes=every_minutes,
+        lookback_days=days,
+        news_limit=news_limit,
+        rss_limit=rss_limit,
+    )
+    console.print(f"[green]Schedule ready:[/green] {schedule_id}")
+
+
+@app.command("list-schedules")
+def schedules() -> None:
+    """List durable topic schedules and their most recent outcomes."""
+
+    rows = list_topic_schedules(get_supabase(get_settings()))
+    table = Table("Topic ID", "Next run", "Interval", "Status", "Failures")
+    for row in rows:
+        table.add_row(
+            str(row["topic_id"]),
+            str(row["next_run_at"]),
+            f"{row['interval_minutes']} min",
+            str(row.get("last_status") or "never"),
+            str(row["consecutive_failures"]),
+        )
+    console.print(table)
+
+
+def _scheduled_topic_runner(schedule: ClaimedTopicSchedule, topic_name: str) -> None:
+    try:
+        run_topic(
+            topic=topic_name,
+            days=schedule.lookback_days,
+            news_limit=schedule.news_limit,
+            rss_limit=schedule.rss_limit,
+        )
+    except typer.Exit as error:
+        if error.exit_code:
+            raise RuntimeError("scheduled topic pipeline failed") from error
+
+
+@app.command("worker")
+def worker(
+    poll_seconds: int = typer.Option(15, min=2, max=300),
+    submission_limit: int = typer.Option(10, min=1, max=50),
+    schedule_limit: int = typer.Option(2, min=1, max=20),
+    probe_limit: int = typer.Option(20, min=5, max=100),
+    once: bool = typer.Option(False, help="Process one cycle and exit."),
+) -> None:
+    """Run the durable intake and scheduled-topic background worker."""
+
+    settings = get_settings()
+    if not settings.openai_api_key:
+        console.print("[red]OPENAI_API_KEY is required for workers.[/red]")
+        raise typer.Exit(code=2)
+    client = get_supabase(settings)
+    missing = check_database_schema(settings)
+    if missing:
+        console.print("[red]Database schema is not ready.[/red]")
+        raise typer.Exit(code=1)
+    worker_id = f"{socket.gethostname()}:{uuid4()}"
+    console.print(f"[green]Worker started:[/green] {worker_id}")
+    try:
+        while True:
+            result = process_worker_cycle(
+                client,
+                settings,
+                worker_id=worker_id,
+                topic_runner=_scheduled_topic_runner,
+                submission_limit=submission_limit,
+                schedule_limit=schedule_limit,
+                probe_limit=probe_limit,
+            )
+            completed = result.submissions_completed + result.schedules_completed
+            failed = result.submissions_failed + result.schedules_failed
+            if completed or failed:
+                console.print(
+                    f"Worker cycle: [green]{completed} completed[/green], "
+                    f"[red]{failed} failed[/red]"
+                )
+            if once:
+                return
+            time.sleep(poll_seconds)
+    except KeyboardInterrupt:
+        console.print("[yellow]Worker stopped.[/yellow]")
+
+
+@app.command("worker-health")
+def worker_health(
+    max_age_seconds: int = typer.Option(120, min=10, max=3600),
+) -> None:
+    """Exit successfully when at least one recent worker heartbeat exists."""
+
+    healthy = worker_is_healthy(get_supabase(get_settings()), max_age_seconds)
+    if not healthy:
+        console.print("[red]No healthy worker heartbeat was found.[/red]")
+        raise typer.Exit(code=1)
+    console.print("[green]A background worker is healthy.[/green]")
+
+
 @app.command()
 def health() -> None:
     """Validate required settings and check Supabase connectivity."""
@@ -618,7 +768,14 @@ def health() -> None:
     except ValidationError as error:
         _configuration_error(error)
 
+    try:
+        provider_names = [name for name, _ in configured_content_providers(settings)]
+    except (ValueError, TypeError) as error:
+        console.print(f"[red]Ingestion configuration error:[/red] {error}")
+        raise typer.Exit(code=2) from error
+
     console.print("[green]Required ingestion variables are configured.[/green]")
+    console.print("[green]Content providers:[/green] " + ", ".join(provider_names))
     if settings.openai_api_key:
         console.print(
             f"[green]Model configured:[/green] {settings.openai_model} via "
@@ -918,7 +1075,14 @@ def reanalyze(
             )
             if not text:
                 raise ValueError("no stored or extractable article text")
-            result = analyzer.analyze(topic_row["name"], candidate.title, text)
+            result = analyzer.analyze(
+                topic_row["name"],
+                candidate.title,
+                text,
+                source_name=candidate.source_name,
+                source_type=candidate.source_type,
+                author=candidate.author,
+            )
             save_analysis(
                 supabase,
                 raw_item_id=candidate.raw_item_id,

@@ -112,7 +112,16 @@ class ArticleAnalyzer:
         wait=wait_exponential(multiplier=1, min=1, max=8),
         reraise=True,
     )
-    def analyze(self, topic: str, title: str, article_text: str) -> ArticleAnalysis:
+    def analyze(
+        self,
+        topic: str,
+        title: str,
+        article_text: str,
+        *,
+        source_name: str | None = None,
+        source_type: str | None = None,
+        author: str | None = None,
+    ) -> ArticleAnalysis:
         """Return validated JSON analysis for one article."""
 
         response = self.client.chat.completions.create(
@@ -131,6 +140,9 @@ class ArticleAnalyzer:
                             {
                                 "topic": topic,
                                 "title": title,
+                                "source_name": source_name,
+                                "source_type": source_type,
+                                "author": author,
                                 "article_text": article_text,
                             },
                             ensure_ascii=False,

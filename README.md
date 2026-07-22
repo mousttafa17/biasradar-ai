@@ -122,6 +122,21 @@ narrative from evidence-backed findings; a claim is stated as supported or
 contradicted only when a repeated claim cluster has sufficiently confident stored
 evidence and at least one evidence URL.
 
+### Source quality and consensus
+
+Football analysis extracts named opinions with an explicit role, stated credential,
+affiliation, direct-source status, incident reference, judgment, and classification
+confidence. The deterministic consensus engine assigns quality from observable
+provenance only, counts a named speaker once when multiple outlets repeat the same
+view, and calculates results separately for officiating experts, official bodies,
+journalists/analysts, match participants, and fans.
+
+Each group has a minimum independent-opinion threshold. Reports return
+`strong_consensus`, `moderate_consensus`, `split`, or `insufficient_evidence` with
+the weighted distribution, duplicate count, source roles, confidence, and explicit
+limitations. These results describe attributed judgments in the collected sample;
+they are never presented as independently verified match facts.
+
 ## Requirements
 
 - Python 3.13+
@@ -154,6 +169,8 @@ supabase/migrations/202607190008_topic_viability.sql
 supabase/migrations/202607190009_topic_intake_queue.sql
 supabase/migrations/202607190010_evidence_review.sql
 supabase/migrations/202607190011_domain_analysis.sql
+supabase/migrations/202607190012_ingestion_provenance.sql
+supabase/migrations/202607190013_worker_scheduling.sql
 ```
 
 You can apply them with your normal Supabase migration workflow or paste them into the
@@ -180,7 +197,14 @@ DOMAIN_PROFILE=football-v1
 
 GOOGLE_FACT_CHECK_API_KEY=
 RSS_FEED_URLS=https://example.com/feed.xml,https://example.org/atom.xml
+FOOTBALL_FEEDS_JSON=[{"url":"https://example.com/official.xml","source_type":"official","provider":"competition_feed","attribution":"Competition organizer"}]
+FOOTBALL_PAGES_JSON=[{"url":"https://example.com/interview","title":"Post-match interview","source_name":"Example FC","source_type":"interview"}]
 PRIMARY_SOURCE_DOMAINS=who.int,sec.gov,fifa.com
+REDDIT_INGESTION_ENABLED=false
+REDDIT_CLIENT_ID=
+REDDIT_CLIENT_SECRET=
+REDDIT_USER_AGENT=
+REDDIT_SUBREDDITS=soccer,football
 API_CORS_ORIGINS=http://localhost:3000
 API_TOPIC_RATE_LIMIT=10
 # Reserved for later stages.
@@ -193,6 +217,31 @@ Supabase dashboard URL.
 
 Never commit `.env`, expose the service-role key in browser code, or paste access
 tokens into logs or issues. `.env` is excluded by `.gitignore`.
+
+### Broader football ingestion
+
+The shared ingestion contract now supports NewsAPI, ordinary RSS/Atom feeds,
+categorized football feeds, explicitly approved official/transcript/interview pages,
+and opt-in Reddit post search. Every item retains its provider identifier, external
+ID, source category, licensing note, required attribution, author, canonical URL,
+and available engagement metrics. One provider failure does not discard successful
+results from the others, and URLs are deduplicated before persistence.
+
+`FOOTBALL_FEEDS_JSON` accepts feed objects with `url`, `source_type`, optional
+`source_name`, `provider`, `content_license`, and `attribution`. Use source types such
+as `official`, `transcript`, or `interview` to keep those channels separate in reports.
+`FOOTBALL_PAGES_JSON` accepts operator-approved public pages with `url`, `title`,
+`source_name`, `source_type`, optional `language`, `content_license`, and
+`attribution`. Page downloads use the existing SSRF-safe, size-bounded cleaner.
+
+Reddit ingestion uses application-only OAuth and the documented API rather than HTML
+scraping. It is disabled by default. Enable it only after registering an approved
+application and confirming that the product's use, retention, attribution, deletion,
+and AI-processing behavior complies with the current
+[Reddit Data API Terms](https://redditinc.com/policies/data-api-terms) and
+[API documentation](https://www.reddit.com/dev/api/). Configure all three credential
+fields and a uniquely identifying user agent before setting
+`REDDIT_INGESTION_ENABLED=true`. The adapter currently searches posts, not comments.
 
 ## CLI usage
 
@@ -216,7 +265,7 @@ uv run biasradar assess-topic \
   --probe-limit 20
 ```
 
-Topic intake normalizes the query, probes bounded NewsAPI and configured RSS
+Topic intake normalizes the query, probes all configured content providers
 coverage, counts independent sources and channels, checks active topics for strong
 token overlap, and requests a structured neutral definition from the configured
 model. The model cannot override duplicate detection or the minimum threshold of five
@@ -315,7 +364,7 @@ uv run biasradar run-topic \
   --rss-limit 20
 ```
 
-`run-topic` fetches NewsAPI and configured RSS entries, stores and analyzes new
+`run-topic` fetches all configured providers, stores and analyzes new
 content, normalizes syndicated groups, and creates one report snapshot. Its daily key
 also contains the lookback, prompt version, and model ID. A completed retry returns
 the existing report, a failed retry resumes the same audit record, and PostgreSQL
@@ -323,6 +372,48 @@ prevents concurrent active runs for one topic. `pipeline_runs` stores bounded co
 provider failures, versions, timestamps, status, and the generated report ID.
 Active jobs renew a database lease; an abandoned run can be reclaimed after 30
 minutes instead of blocking that topic permanently.
+
+### Background worker and scheduling
+
+Create or update a durable daily schedule for an active topic:
+
+```bash
+uv run biasradar schedule-topic \
+  "Argentina FIFA Favoritism" \
+  --every-minutes 1440 \
+  --days 30 \
+  --news-limit 20 \
+  --rss-limit 20
+
+uv run biasradar list-schedules
+```
+
+Run one worker cycle for validation, then start the long-running process:
+
+```bash
+uv run biasradar worker --once
+uv run biasradar worker --poll-seconds 15
+uv run biasradar worker-health --max-age-seconds 120
+```
+
+The worker handles queued topic viability submissions and due topic schedules.
+PostgreSQL claims use row locks with `SKIP LOCKED`, so multiple replicas can poll
+safely. Schedule leases recover abandoned work, successful jobs advance by their
+configured interval, and failed jobs use bounded retry backoff. Scheduling is
+currently daily-or-slower because pipeline idempotency is daily.
+
+For container deployment, keep production secrets in the platform's secret manager
+or an uncommitted `.env`, then run:
+
+```bash
+docker compose up --build -d worker
+docker compose ps
+docker compose logs -f worker
+```
+
+The container runs as a non-root user, installs from `uv.lock`, restarts unless
+stopped, and uses `worker-health` for its health check. The Docker build follows the
+official [uv Docker integration guidance](https://docs.astral.sh/uv/guides/integration/docker/).
 
 ### Read API
 
@@ -340,6 +431,8 @@ The initial frontend contract exposes:
 - `GET /topics/{topic_id}/reports?days=365&limit=50&offset=0`
 - `GET /topics/{topic_id}/reports/{report_id}`
 - `GET /topics/{topic_id}/timeline?days=365&limit=365`
+- `GET /topics/{topic_id}/incidents?days=30&limit=500`
+- `GET /topics/{topic_id}/narratives?days=365&limit=100`
 - `GET /docs` for interactive OpenAPI documentation
 - `GET /openapi.json` for the machine-readable contract
 - `POST /topic-submissions`
@@ -348,6 +441,14 @@ The initial frontend contract exposes:
 - `GET /claims/{claim_id}/evidence`
 - `GET /review/evidence?status=pending`
 - `POST /review/evidence/{candidate_id}/decision`
+
+The incident endpoint clusters current football-v1 incident extractions and returns
+stable frontend IDs, decisions, VAR/review outcomes, independent coverage counts,
+channel composition, and matching qualified-source consensus. The narrative endpoint
+returns visualization metrics (`label`, `percentage`, `item_count`, `confidence`,
+and `trend`), controversy/content/framing counts, consensus, and chronological report
+history. Both endpoints return allow-listed public models and never expose model
+reasoning or internal database rows.
 
 The server binds to `127.0.0.1:8000` by default. `API_CORS_ORIGINS` is a
 comma-separated allow-list of exact frontend origins; wildcards, paths, queries, and
@@ -617,7 +718,7 @@ and the OpenAPI contract. Live API credentials are not required for unit tests.
 The following capabilities remain on the roadmap:
 
 - Additional evidence providers beyond Google Fact Check Tools.
-- Dedicated primary-source discovery and human review workflows.
+- Automated deletion/compliance synchronization for social-provider content.
 - More scalable/semantic syndicated detection for very large corpora and heavily
   rewritten republications.
 - Semantic claim clustering for paraphrases beyond lexical similarity.

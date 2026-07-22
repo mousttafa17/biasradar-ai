@@ -55,6 +55,9 @@ REQUIRED_COLUMNS = {
         "deduplicated_at",
         "ingestion_provider",
         "engagement_data",
+        "external_id",
+        "content_license",
+        "attribution",
     },
     "analysis": {
         "id",
@@ -128,6 +131,21 @@ REQUIRED_COLUMNS = {
         "heartbeat_at",
         "finished_at",
     },
+    "topic_schedules": {
+        "id",
+        "topic_id",
+        "enabled",
+        "interval_minutes",
+        "lookback_days",
+        "news_limit",
+        "rss_limit",
+        "next_run_at",
+        "lease_expires_at",
+        "last_status",
+        "last_error",
+        "consecutive_failures",
+    },
+    "worker_instances": {"worker_id", "started_at", "heartbeat_at", "metadata"},
     "topic_submissions": {
         "id",
         "raw_query",
@@ -225,6 +243,9 @@ REQUIRED_RPC_PATHS = {
         "function consume_topic_intake_rate_limit"
     ),
     "/rpc/claim_topic_submissions": "function claim_topic_submissions",
+    "/rpc/claim_due_topic_schedules": "function claim_due_topic_schedules",
+    "/rpc/finish_topic_schedule": "function finish_topic_schedule",
+    "/rpc/heartbeat_worker": "function heartbeat_worker",
     "/rpc/submit_evidence_review": "function submit_evidence_review",
 }
 
@@ -253,6 +274,9 @@ class ReanalysisCandidate:
     raw_item_id: str
     title: str
     url: str
+    source_name: str
+    source_type: str
+    author: str | None
     fallback_text: str | None
     cleaned_text: str | None
     current_version: int | None
@@ -267,6 +291,16 @@ class PipelineRun:
     report_id: str | None
     period_start: str
     period_end: str
+
+
+@dataclass(slots=True)
+class ClaimedTopicSchedule:
+    schedule_id: str
+    topic_id: str
+    interval_minutes: int
+    lookback_days: int
+    news_limit: int
+    rss_limit: int
 
 
 @dataclass(slots=True)
@@ -362,6 +396,106 @@ def find_topic(client: Client, topic_name: str) -> dict[str, Any] | None:
             .execute()
         )
     return response.data[0] if response.data else None
+
+
+def find_topic_by_id(client: Client, topic_id: str) -> dict[str, Any] | None:
+    response = (
+        client.table("topics")
+        .select("id,name,status,keywords")
+        .eq("id", topic_id)
+        .limit(1)
+        .execute()
+    )
+    return response.data[0] if response.data else None
+
+
+def upsert_topic_schedule(
+    client: Client,
+    *,
+    topic_id: str,
+    interval_minutes: int,
+    lookback_days: int,
+    news_limit: int,
+    rss_limit: int,
+    enabled: bool = True,
+) -> str:
+    row = {
+        "topic_id": topic_id,
+        "interval_minutes": interval_minutes,
+        "lookback_days": lookback_days,
+        "news_limit": news_limit,
+        "rss_limit": rss_limit,
+        "enabled": enabled,
+        "next_run_at": datetime.now(UTC).isoformat(),
+    }
+    response = (
+        client.table("topic_schedules").upsert(row, on_conflict="topic_id").execute()
+    )
+    if not response.data:
+        raise ValueError("Supabase did not return a topic schedule")
+    return str(response.data[0]["id"])
+
+
+def list_topic_schedules(client: Client) -> list[dict[str, Any]]:
+    response = (
+        client.table("topic_schedules")
+        .select(
+            "id,topic_id,enabled,interval_minutes,lookback_days,news_limit,"
+            "rss_limit,next_run_at,last_status,last_error,consecutive_failures"
+        )
+        .order("next_run_at")
+        .execute()
+    )
+    return list(response.data)
+
+
+def claim_due_topic_schedules(client: Client, limit: int) -> list[ClaimedTopicSchedule]:
+    response = client.rpc("claim_due_topic_schedules", {"p_limit": limit}).execute()
+    return [
+        ClaimedTopicSchedule(
+            schedule_id=str(row["id"]),
+            topic_id=str(row["topic_id"]),
+            interval_minutes=int(row["interval_minutes"]),
+            lookback_days=int(row["lookback_days"]),
+            news_limit=int(row["news_limit"]),
+            rss_limit=int(row["rss_limit"]),
+        )
+        for row in response.data
+    ]
+
+
+def finish_topic_schedule(
+    client: Client, schedule_id: str, succeeded: bool, error: str | None = None
+) -> None:
+    client.rpc(
+        "finish_topic_schedule",
+        {
+            "p_schedule_id": schedule_id,
+            "p_succeeded": succeeded,
+            "p_error": error[:500] if error else None,
+        },
+    ).execute()
+
+
+def heartbeat_worker(
+    client: Client, worker_id: str, metadata: dict[str, object]
+) -> None:
+    client.rpc(
+        "heartbeat_worker",
+        {"p_worker_id": worker_id, "p_metadata": metadata},
+    ).execute()
+
+
+def worker_is_healthy(client: Client, max_age_seconds: int = 120) -> bool:
+    cutoff = (datetime.now(UTC) - timedelta(seconds=max_age_seconds)).isoformat()
+    response = (
+        client.table("worker_instances")
+        .select("worker_id")
+        .gte("heartbeat_at", cutoff)
+        .limit(1)
+        .execute()
+    )
+    return bool(response.data)
 
 
 def create_topic_submission(client: Client, query: str) -> TopicSubmission:
@@ -517,6 +651,9 @@ def article_row(article: IngestedItem, topic_id: str | None) -> dict[str, Any]:
         else None,
         "raw_text": article.raw_text,
         "engagement_data": article.engagement_data,
+        "external_id": article.external_id,
+        "content_license": article.content_license,
+        "attribution": article.attribution,
         "language": article.language,
         "status": "new",
     }
@@ -785,7 +922,7 @@ def load_reanalysis_candidates(
 
     raw_response = (
         client.table("raw_items")
-        .select("id,title,url,raw_text,cleaned_text")
+        .select("id,title,url,source_name,source_type,author,raw_text,cleaned_text")
         .eq("topic_id", topic_id)
         .gte("fetched_at", period_start)
         .lte("fetched_at", period_end)
@@ -817,6 +954,9 @@ def load_reanalysis_candidates(
                 raw_item_id=raw_item_id,
                 title=str(row["title"]),
                 url=str(row["url"]),
+                source_name=str(row.get("source_name") or "Unknown"),
+                source_type=str(row.get("source_type") or "news"),
+                author=str(row["author"]) if row.get("author") else None,
                 fallback_text=row.get("raw_text"),
                 cleaned_text=row.get("cleaned_text"),
                 current_version=(

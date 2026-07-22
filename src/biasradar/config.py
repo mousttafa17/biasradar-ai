@@ -1,5 +1,6 @@
 """Application configuration loaded from environment variables."""
 
+import json
 from functools import lru_cache
 from urllib.parse import urlsplit
 
@@ -79,7 +80,14 @@ class Settings(BaseSettings):
     domain_profile: str = "football-v1"
     google_fact_check_api_key: str | None = None
     rss_feed_urls: str | None = None
+    football_feeds_json: str | None = None
+    football_pages_json: str | None = None
     primary_source_domains: str | None = None
+    reddit_client_id: str | None = None
+    reddit_client_secret: str | None = None
+    reddit_user_agent: str | None = None
+    reddit_subreddits: str | None = None
+    reddit_ingestion_enabled: bool = False
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
 
@@ -113,7 +121,12 @@ class Settings(BaseSettings):
             raise ValueError("contains an empty or placeholder credential")
         return value.strip()
 
-    @field_validator("openai_api_key", "google_fact_check_api_key")
+    @field_validator(
+        "openai_api_key",
+        "google_fact_check_api_key",
+        "reddit_client_id",
+        "reddit_client_secret",
+    )
     @classmethod
     def reject_optional_placeholder(cls, value: str | None) -> str | None:
         if not value:
@@ -147,6 +160,58 @@ class Settings(BaseSettings):
             for value in self.primary_source_domains.replace("\n", ",").split(",")
             if value.strip()
         ]
+
+    @property
+    def configured_football_feeds(self):
+        """Return validated categorized football feed definitions."""
+
+        from biasradar.ingestion.rss import FeedSource
+
+        if not self.football_feeds_json:
+            return []
+        payload = json.loads(self.football_feeds_json)
+        if not isinstance(payload, list):
+            raise ValueError("FOOTBALL_FEEDS_JSON must contain a JSON array")
+        return [FeedSource.model_validate(value) for value in payload]
+
+    @property
+    def configured_football_pages(self):
+        """Return validated opt-in official, transcript, and interview pages."""
+
+        from biasradar.ingestion.curated_pages import CuratedPageSource
+
+        if not self.football_pages_json:
+            return []
+        payload = json.loads(self.football_pages_json)
+        if not isinstance(payload, list):
+            raise ValueError("FOOTBALL_PAGES_JSON must contain a JSON array")
+        return [CuratedPageSource.model_validate(value) for value in payload]
+
+    @property
+    def configured_reddit_subreddits(self) -> list[str]:
+        if not self.reddit_subreddits:
+            return []
+        return [
+            value.strip().removeprefix("r/")
+            for value in self.reddit_subreddits.replace("\n", ",").split(",")
+            if value.strip()
+        ]
+
+    @property
+    def reddit_is_configured(self) -> bool:
+        if not self.reddit_ingestion_enabled:
+            return False
+        values = (
+            self.reddit_client_id,
+            self.reddit_client_secret,
+            self.reddit_user_agent,
+        )
+        if any(values) and not all(values):
+            raise ValueError(
+                "REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, and REDDIT_USER_AGENT "
+                "must be configured together"
+            )
+        return all(values)
 
 
 @lru_cache

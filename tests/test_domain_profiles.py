@@ -91,4 +91,4 @@ def test_article_analyzer_applies_football_prompt_and_validation(monkeypatch) ->
     assert result.domain_profile == "football-v1"
     assert result.domain_analysis["primary_stance"] == FootballStance.CRITICIZES_REFEREE
     assert "DOMAIN PROFILE: football-v1" in analyzer.system_prompt
-    assert analyzer.prompt_version.endswith("football-v1")
+    assert analyzer.prompt_version.endswith("football-consensus-v2")

@@ -16,6 +16,10 @@ from biasradar.api.models import (
     EvidenceReviewRequest,
     EvidenceReviewResponse,
     HealthResponse,
+    IncidentListResponse,
+    IncidentView,
+    NarrativeHistoryPoint,
+    NarrativeResponse,
     ReportListResponse,
     ReportSummary,
     TimelinePoint,
@@ -25,11 +29,13 @@ from biasradar.api.models import (
     TopicSubmissionRequest,
     TopicSubmissionResponse,
     TopicSummary,
+    VisualizationMetric,
 )
 from biasradar.api.repository import ReadRepository, SupabaseReadRepository
 from biasradar.config import APISettings, get_api_settings
 
 IDEMPOTENCY_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,200}$")
+TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
 
 
 @lru_cache
@@ -86,6 +92,43 @@ def _overview(topic_row: dict[str, object], report: dict[str, object]):
             "summary": report["report_text"],
         }
     )
+
+
+def _tokens(value: str) -> set[str]:
+    return set(TOKEN_PATTERN.findall(value.casefold()))
+
+
+def _similar(left: str, right: str) -> float:
+    left_tokens, right_tokens = _tokens(left), _tokens(right)
+    union = left_tokens | right_tokens
+    return len(left_tokens & right_tokens) / len(union) if union else 0.0
+
+
+def _narrative_metrics(
+    summary: dict[str, object],
+    confidence: float,
+    previous: dict[str, object] | None = None,
+) -> list[VisualizationMetric]:
+    distribution = summary.get("stance_distribution") or {}
+    counts = summary.get("stance_counts") or {}
+    previous_distribution = (previous or {}).get("stance_distribution") or {}
+    analyzed = int(summary.get("analyzed_items") or 0)
+    return [
+        VisualizationMetric(
+            label=str(label),
+            percentage=float(percentage),
+            item_count=int(
+                counts.get(label, round(analyzed * float(percentage) / 100))
+            ),
+            confidence=confidence,
+            trend=(
+                round(float(percentage) - float(previous_distribution.get(label, 0)), 1)
+                if previous
+                else None
+            ),
+        )
+        for label, percentage in distribution.items()
+    ]
 
 
 def _submission(row: dict[str, object]) -> TopicSubmissionResponse:
@@ -257,6 +300,186 @@ def create_app(settings: APISettings | None = None) -> FastAPI:
             )
 
         return _overview(topic_row, report)
+
+    @application.get(
+        "/topics/{topic_id}/incidents",
+        response_model=IncidentListResponse,
+        tags=["football"],
+    )
+    def topic_incidents(
+        topic_id: UUID,
+        repository: Annotated[ReadRepository, Depends(get_repository)],
+        days: int = Query(30, ge=1, le=3650),
+        limit: int = Query(500, ge=1, le=1000),
+    ) -> IncidentListResponse:
+        period_end = datetime.now(UTC)
+        period_start = period_end - timedelta(days=days)
+        try:
+            if not repository.get_topic(str(topic_id)):
+                raise HTTPException(status_code=404, detail="topic not found")
+            rows = repository.list_topic_domain_analyses(
+                str(topic_id), period_start.isoformat(), limit
+            )
+            report = repository.get_latest_report(
+                str(topic_id), period_start.isoformat()
+            )
+        except HTTPException:
+            raise
+        except Exception as error:
+            raise HTTPException(
+                status_code=503, detail="database unavailable"
+            ) from error
+
+        clusters: list[dict[str, object]] = []
+        for row in rows:
+            analysis = row.get("domain_analysis") or {}
+            for incident in analysis.get("incidents", []):
+                description = str(incident.get("description") or "").strip()
+                if not description:
+                    continue
+                cluster = next(
+                    (
+                        value
+                        for value in clusters
+                        if value["type"] == incident.get("controversy_type")
+                        and _similar(str(value["description"]), description) >= 0.55
+                    ),
+                    None,
+                )
+                if cluster is None:
+                    cluster = {
+                        "type": incident.get("controversy_type") or "other_football",
+                        "description": description,
+                        "minute": incident.get("match_minute"),
+                        "decision": incident.get("on_field_decision"),
+                        "review": incident.get("review_outcome"),
+                        "items": set(),
+                        "sources": set(),
+                        "groups": set(),
+                        "channels": {},
+                    }
+                    clusters.append(cluster)
+                cluster["items"].add(str(row["raw_item_id"]))
+                cluster["sources"].add(str(row.get("source_name") or "Unknown"))
+                cluster["groups"].add(
+                    str(row.get("content_group_id") or row["raw_item_id"])
+                )
+                channel = str(row.get("source_type") or "news")
+                cluster["channels"][channel] = cluster["channels"].get(channel, 0) + 1
+
+        football_summary = ((report or {}).get("report_data") or {}).get(
+            "football_summary"
+        ) or {}
+        consensus = football_summary.get("consensus_results", [])
+        items = []
+        for cluster in clusters:
+            matching_consensus = [
+                value
+                for value in consensus
+                if _similar(
+                    str(value.get("incident_ref") or ""),
+                    str(cluster["description"]),
+                )
+                >= 0.4
+            ]
+            identity_description = (
+                " ".join(sorted(_tokens(str(cluster["description"]))))
+                if cluster["minute"] is None and not cluster["decision"]
+                else ""
+            )
+            key = (
+                f"{cluster['type']}:{cluster['minute']}:{cluster['decision']}:"
+                f"{cluster['review']}:{identity_description}"
+            )
+            item_count = len(cluster["items"])
+            independent_groups = len(cluster["groups"])
+            items.append(
+                IncidentView(
+                    incident_id=hashlib.sha256(key.encode()).hexdigest()[:16],
+                    controversy_type=str(cluster["type"]),
+                    description=str(cluster["description"]),
+                    match_minute=cluster["minute"],
+                    on_field_decision=cluster["decision"],
+                    review_outcome=cluster["review"],
+                    item_count=item_count,
+                    source_count=len(cluster["sources"]),
+                    independent_content_groups=independent_groups,
+                    syndicated_items=item_count - independent_groups,
+                    channel_counts=cluster["channels"],
+                    consensus=matching_consensus,
+                )
+            )
+        items.sort(key=lambda item: (item.item_count, item.source_count), reverse=True)
+        return IncidentListResponse(
+            topic_id=topic_id,
+            period_start=period_start,
+            period_end=period_end,
+            items=items,
+            limitations=[
+                "Incidents are model-extracted and lexically clustered.",
+                "Consensus describes attributed judgments, not verified match facts.",
+            ],
+        )
+
+    @application.get(
+        "/topics/{topic_id}/narratives",
+        response_model=NarrativeResponse,
+        tags=["football"],
+    )
+    def topic_narratives(
+        topic_id: UUID,
+        repository: Annotated[ReadRepository, Depends(get_repository)],
+        days: int = Query(365, ge=1, le=3650),
+        limit: int = Query(100, ge=1, le=365),
+    ) -> NarrativeResponse:
+        cutoff = datetime.now(UTC) - timedelta(days=days)
+        try:
+            if not repository.get_topic(str(topic_id)):
+                raise HTTPException(status_code=404, detail="topic not found")
+            rows = repository.list_reports(str(topic_id), cutoff.isoformat(), limit, 0)
+        except HTTPException:
+            raise
+        except Exception as error:
+            raise HTTPException(
+                status_code=503, detail="database unavailable"
+            ) from error
+        if not rows:
+            raise HTTPException(status_code=404, detail="no narrative reports found")
+        chronological = list(reversed(rows))
+        history = []
+        previous_summary = None
+        for row in chronological:
+            summary = (row.get("report_data") or {}).get("football_summary") or {}
+            history.append(
+                NarrativeHistoryPoint(
+                    report_id=row["id"],
+                    timestamp=row["period_end"],
+                    metrics=_narrative_metrics(
+                        summary, float(row["confidence_score"]), previous_summary
+                    ),
+                )
+            )
+            previous_summary = summary
+        latest = rows[0]
+        latest_summary = (latest.get("report_data") or {}).get("football_summary") or {}
+        previous = (
+            (rows[1].get("report_data") or {}).get("football_summary") or {}
+            if len(rows) > 1
+            else None
+        )
+        return NarrativeResponse(
+            topic_id=topic_id,
+            period_start=latest["period_start"],
+            period_end=latest["period_end"],
+            metrics=_narrative_metrics(
+                latest_summary, float(latest["confidence_score"]), previous
+            ),
+            controversy_type_counts=latest_summary.get("controversy_type_counts", {}),
+            content_mode_counts=latest_summary.get("content_mode_counts", {}),
+            framing_tag_counts=latest_summary.get("framing_tag_counts", {}),
+            consensus=latest_summary.get("consensus_results", []),
+            history=history,
+        )
 
     @application.get(
         "/topics/{topic_id}/reports",

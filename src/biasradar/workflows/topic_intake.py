@@ -10,9 +10,8 @@ from biasradar.analysis.topic_viability import (
     enforce_measurable_gates,
 )
 from biasradar.config import Settings
-from biasradar.ingestion.newsapi import NewsFetcher
-from biasradar.ingestion.rss import RSSFetcher
 from biasradar.persistence.repository import find_similar_topic, save_topic_viability
+from biasradar.workflows.content_ingestion import collect_topic_content
 
 
 def assess_topic_submission(
@@ -25,23 +24,8 @@ def assess_topic_submission(
 ) -> tuple[TopicViabilityAssessment, CoverageSignals, str | None]:
     """Probe, assess, gate, and atomically finalize one claimed submission."""
 
-    candidates = []
-    successful_providers = 0
-    try:
-        candidates.extend(NewsFetcher(settings.newsapi_key).fetch(query, probe_limit))
-        successful_providers += 1
-    except Exception:
-        pass
-    if settings.configured_rss_feeds:
-        try:
-            candidates.extend(
-                RSSFetcher(settings.configured_rss_feeds).fetch(query, probe_limit)
-            )
-            successful_providers += 1
-        except Exception:
-            pass
-    if not successful_providers:
-        raise RuntimeError("no coverage provider was available")
+    ingestion = collect_topic_content(settings, query, probe_limit)
+    candidates = ingestion.items
 
     unique_candidates = list({str(item.url): item for item in candidates}.values())
     signals = coverage_signals(unique_candidates)

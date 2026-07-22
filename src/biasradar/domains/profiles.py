@@ -38,7 +38,7 @@ GENERIC_V1 = DomainProfile(
 
 FOOTBALL_V1 = DomainProfile(
     profile_id="football-v1",
-    prompt_version="football-v1",
+    prompt_version="football-consensus-v2",
     analysis_model=FootballAnalysis,
     prompt_path=PROMPT_ROOT / "football_controversy.txt",
 )

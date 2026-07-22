@@ -28,6 +28,10 @@ class ReadRepository(Protocol):
 
     def get_report(self, topic_id: str, report_id: str) -> dict[str, Any] | None: ...
 
+    def list_topic_domain_analyses(
+        self, topic_id: str, period_start: str, limit: int
+    ) -> list[dict[str, Any]]: ...
+
     def authenticate(self, token: str) -> str | None: ...
 
     def authenticate_reviewer(self, token: str) -> str | None: ...
@@ -149,6 +153,35 @@ class SupabaseReadRepository:
             .execute()
         )
         return response.data[0] if response.data else None
+
+    def list_topic_domain_analyses(
+        self, topic_id: str, period_start: str, limit: int
+    ) -> list[dict[str, Any]]:
+        raw_response = (
+            self.client.table("raw_items")
+            .select("id,source_name,source_type,content_group_id")
+            .eq("topic_id", topic_id)
+            .gte("fetched_at", period_start)
+            .order("fetched_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        raw_by_id = {str(row["id"]): row for row in raw_response.data}
+        if not raw_by_id:
+            return []
+        response = (
+            self.client.table("analysis")
+            .select("raw_item_id,domain_profile,domain_analysis")
+            .in_("raw_item_id", list(raw_by_id))
+            .eq("is_current", True)
+            .eq("domain_profile", "football-v1")
+            .execute()
+        )
+        return [
+            {**row, **raw_by_id[str(row["raw_item_id"])]}
+            for row in response.data
+            if str(row["raw_item_id"]) in raw_by_id
+        ]
 
     def authenticate(self, token: str) -> str | None:
         response = self.client.auth.get_user(token)

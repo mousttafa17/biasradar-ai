@@ -14,6 +14,9 @@ class IngestedItem(BaseModel):
     source_name: str = "Unknown"
     source_type: str = "news"
     provider: str = "unknown"
+    external_id: str | None = None
+    content_license: str | None = None
+    attribution: str | None = None
     language: str = "en"
     title: str
     url: HttpUrl

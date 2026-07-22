@@ -69,6 +69,7 @@ class FakeRepository:
                 "football_summary": {
                     "analyzed_items": 12,
                     "stance_distribution": {"criticizes_referee": 60.0},
+                    "stance_counts": {"criticizes_referee": 7},
                     "controversy_type_counts": {"VAR_decision": 8},
                     "content_mode_counts": {"neutral_match_reporting": 4},
                     "framing_tag_counts": {"fan_emotion": 3},
@@ -76,6 +77,27 @@ class FakeRepository:
                     "referees": {"Example Referee": 6},
                     "federations": {"FIFA": 4},
                     "attributed_expert_opinions": 5,
+                    "consensus_results": [
+                        {
+                            "incident_ref": "72nd minute penalty decision",
+                            "source_group": "officiating_expert",
+                            "status": "moderate_consensus",
+                            "leading_position": "disagrees_with_decision",
+                            "leading_percent": 75.0,
+                            "position_distribution": {
+                                "disagrees_with_decision": 75.0,
+                                "agrees_with_decision": 25.0,
+                            },
+                            "extracted_opinions": 5,
+                            "independent_opinions": 4,
+                            "duplicate_mentions": 1,
+                            "average_source_quality": 0.94,
+                            "confidence": 0.63,
+                            "source_roles": {"former_referee": 4},
+                            "summary": "Moderate officiating expert consensus.",
+                            "limitations": ["Collected-sample limitation."],
+                        }
+                    ],
                 },
                 "methodology": "Channel-balanced aggregation.",
                 "limitations": ["Sample limitation."],
@@ -85,6 +107,48 @@ class FakeRepository:
     def list_reports(self, topic_id: str, period_start: str, limit: int, offset: int):
         report = self.get_latest_report(topic_id, period_start)
         return [report] if report else []
+
+    def list_topic_domain_analyses(self, topic_id: str, period_start: str, limit: int):
+        if topic_id != TOPIC_ID:
+            return []
+        return [
+            {
+                "raw_item_id": "raw-1",
+                "source_name": "Referee Journal",
+                "source_type": "interview",
+                "content_group_id": "group-1",
+                "domain_profile": "football-v1",
+                "domain_analysis": {
+                    "incidents": [
+                        {
+                            "controversy_type": "penalty_claim",
+                            "description": "The 72nd-minute penalty decision",
+                            "match_minute": 72,
+                            "on_field_decision": "Penalty awarded",
+                            "review_outcome": "VAR upheld the decision",
+                        }
+                    ]
+                },
+            },
+            {
+                "raw_item_id": "raw-2",
+                "source_name": "Football News",
+                "source_type": "news",
+                "content_group_id": "group-2",
+                "domain_profile": "football-v1",
+                "domain_analysis": {
+                    "incidents": [
+                        {
+                            "controversy_type": "penalty_claim",
+                            "description": "Penalty decision in the 72nd minute",
+                            "match_minute": 72,
+                            "on_field_decision": "Penalty awarded",
+                            "review_outcome": "VAR upheld the decision",
+                        }
+                    ]
+                },
+            },
+        ][:limit]
 
     def get_report(self, topic_id: str, report_id: str):
         report = self.get_latest_report(topic_id, "")
@@ -209,6 +273,9 @@ def test_overview_returns_frontend_ready_summary_without_internal_data() -> None
     assert payload["domain_profile"] == "football-v1"
     assert payload["football_summary"]["controversy_type_counts"] == {"VAR_decision": 8}
     assert payload["verified_findings"] == ["Evidence supports: Example finding"]
+    assert payload["football_summary"]["consensus_results"][0]["status"] == (
+        "moderate_consensus"
+    )
     assert "model_reasoning" not in response.text
 
 
@@ -238,6 +305,41 @@ def test_report_history_detail_and_timeline_are_frontend_ready() -> None:
         "independent_content_groups": 10,
         "channel_counts": {"news": 8, "rss": 4},
     }
+
+
+def test_incident_api_clusters_sources_and_attaches_consensus() -> None:
+    client, _ = _client()
+
+    response = client.get(f"/topics/{TOPIC_ID}/incidents?days=30")
+
+    assert response.status_code == 200
+    incident = response.json()["items"][0]
+    assert incident["controversy_type"] == "penalty_claim"
+    assert incident["item_count"] == 2
+    assert incident["source_count"] == 2
+    assert incident["independent_content_groups"] == 2
+    assert incident["syndicated_items"] == 0
+    assert incident["channel_counts"] == {"interview": 1, "news": 1}
+    assert incident["consensus"][0]["source_group"] == "officiating_expert"
+
+
+def test_narrative_api_returns_visualization_metrics_and_history() -> None:
+    client, _ = _client()
+
+    response = client.get(f"/topics/{TOPIC_ID}/narratives?days=365")
+
+    assert response.status_code == 200
+    payload = response.json()
+    metric = payload["metrics"][0]
+    assert metric == {
+        "label": "criticizes_referee",
+        "percentage": 60.0,
+        "item_count": 7,
+        "confidence": 0.72,
+        "trend": None,
+    }
+    assert payload["controversy_type_counts"] == {"VAR_decision": 8}
+    assert len(payload["history"]) == 1
 
 
 def test_authenticated_topic_submission_is_queued_without_running_assessment() -> None:
@@ -340,6 +442,8 @@ def test_openapi_documents_initial_public_contract() -> None:
         "/topics/{topic_id}/reports",
         "/topics/{topic_id}/reports/{report_id}",
         "/topics/{topic_id}/timeline",
+        "/topics/{topic_id}/incidents",
+        "/topics/{topic_id}/narratives",
         "/topic-submissions",
         "/topic-submissions/{submission_id}",
         "/topic-submissions/{submission_id}/retry",

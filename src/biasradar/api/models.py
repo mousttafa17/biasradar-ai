@@ -39,9 +39,27 @@ class StanceDistribution(PublicModel):
     unclear: float = Field(ge=0, le=100)
 
 
+class ConsensusResultResponse(PublicModel):
+    incident_ref: str
+    source_group: str
+    status: str
+    leading_position: str | None = None
+    leading_percent: float | None = Field(default=None, ge=0, le=100)
+    position_distribution: dict[str, float]
+    extracted_opinions: int = Field(ge=0)
+    independent_opinions: int = Field(ge=0)
+    duplicate_mentions: int = Field(ge=0)
+    average_source_quality: float = Field(ge=0, le=1)
+    confidence: float = Field(ge=0, le=1)
+    source_roles: dict[str, int]
+    summary: str
+    limitations: list[str]
+
+
 class FootballReportSummaryResponse(PublicModel):
     analyzed_items: int = Field(ge=0)
     stance_distribution: dict[str, float]
+    stance_counts: dict[str, int] = Field(default_factory=dict)
     controversy_type_counts: dict[str, int]
     content_mode_counts: dict[str, int]
     framing_tag_counts: dict[str, int]
@@ -49,6 +67,56 @@ class FootballReportSummaryResponse(PublicModel):
     referees: dict[str, int]
     federations: dict[str, int]
     attributed_expert_opinions: int = Field(ge=0)
+    consensus_results: list[ConsensusResultResponse] = Field(default_factory=list)
+
+
+class VisualizationMetric(PublicModel):
+    label: str
+    percentage: float = Field(ge=0, le=100)
+    item_count: int = Field(ge=0)
+    confidence: float = Field(ge=0, le=1)
+    trend: float | None = None
+
+
+class IncidentView(PublicModel):
+    incident_id: str
+    controversy_type: str
+    description: str
+    match_minute: int | None = Field(default=None, ge=0, le=130)
+    on_field_decision: str | None = None
+    review_outcome: str | None = None
+    item_count: int = Field(ge=1)
+    source_count: int = Field(ge=1)
+    independent_content_groups: int = Field(ge=1)
+    syndicated_items: int = Field(ge=0)
+    channel_counts: dict[str, int]
+    consensus: list[ConsensusResultResponse] = Field(default_factory=list)
+
+
+class IncidentListResponse(PublicModel):
+    topic_id: UUID
+    period_start: datetime
+    period_end: datetime
+    items: list[IncidentView]
+    limitations: list[str]
+
+
+class NarrativeHistoryPoint(PublicModel):
+    report_id: UUID
+    timestamp: datetime
+    metrics: list[VisualizationMetric]
+
+
+class NarrativeResponse(PublicModel):
+    topic_id: UUID
+    period_start: datetime
+    period_end: datetime
+    metrics: list[VisualizationMetric]
+    controversy_type_counts: dict[str, int]
+    content_mode_counts: dict[str, int]
+    framing_tag_counts: dict[str, int]
+    consensus: list[ConsensusResultResponse]
+    history: list[NarrativeHistoryPoint]
 
 
 class TopicOverviewResponse(PublicModel):

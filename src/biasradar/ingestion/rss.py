@@ -6,6 +6,7 @@ from time import struct_time
 
 import feedparser
 import httpx
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 from biasradar.common.security import validate_public_url, validated_redirect
 from biasradar.ingestion.models import IngestedItem
@@ -18,6 +19,19 @@ class RSSFetchError(RuntimeError):
     """A sanitized RSS failure."""
 
 
+class FeedSource(BaseModel):
+    """Configured feed plus explicit provenance/category metadata."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: HttpUrl
+    source_type: str = Field(default="rss", min_length=1, max_length=50)
+    source_name: str | None = Field(default=None, max_length=200)
+    provider: str = Field(default="rss", min_length=1, max_length=100)
+    content_license: str | None = Field(default=None, max_length=500)
+    attribution: str | None = Field(default=None, max_length=500)
+
+
 def _parsed_datetime(value: struct_time | None) -> datetime | None:
     if not value:
         return None
@@ -27,8 +41,13 @@ def _parsed_datetime(value: struct_time | None) -> datetime | None:
 class RSSFetcher:
     """Fetch configured feeds and normalize matching entries."""
 
-    def __init__(self, feed_urls: list[str], timeout: float = 20.0) -> None:
-        self.feed_urls = feed_urls
+    def __init__(
+        self, feed_urls: list[str | FeedSource], timeout: float = 20.0
+    ) -> None:
+        self.feeds = [
+            value if isinstance(value, FeedSource) else FeedSource(url=value)
+            for value in feed_urls
+        ]
         self.timeout = timeout
 
     def _download(self, feed_url: str) -> bytes:
@@ -67,14 +86,17 @@ class RSSFetcher:
         }
         items: list[IngestedItem] = []
         successful_feeds = 0
-        for feed_url in self.feed_urls:
+        for configured_feed in self.feeds:
+            feed_url = str(configured_feed.url)
             try:
                 parsed = feedparser.parse(self._download(feed_url))
                 successful_feeds += 1
             except Exception:
                 continue
 
-            source_name = str(parsed.feed.get("title") or "Unknown RSS source")
+            source_name = configured_feed.source_name or str(
+                parsed.feed.get("title") or "Unknown RSS source"
+            )
             language = str(parsed.feed.get("language") or "en")[:2].casefold()
             for entry in parsed.entries:
                 title = str(entry.get("title") or "").strip()
@@ -89,8 +111,11 @@ class RSSFetcher:
                     items.append(
                         IngestedItem(
                             source_name=source_name,
-                            source_type="rss",
-                            provider="rss",
+                            source_type=configured_feed.source_type,
+                            provider=configured_feed.provider,
+                            external_id=str(entry.get("id") or link),
+                            content_license=configured_feed.content_license,
+                            attribution=configured_feed.attribution,
                             language=language,
                             title=title,
                             url=link,
