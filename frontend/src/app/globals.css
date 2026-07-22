@@ -1,0 +1,115 @@
+@import "tailwindcss";
+
+:root {
+  --ink: #07110f;
+  --paper: #f1f4eb;
+  --muted: #9aa7a1;
+  --panel: #0d1916;
+  --line: rgba(226, 236, 228, 0.12);
+  --signal: #73f2b0;
+  --signal-bright: #99ffca;
+  --critical: #ff735d;
+  --support: #68b9ff;
+}
+
+@theme inline {
+  --color-ink: var(--ink);
+  --color-paper: var(--paper);
+  --color-muted: var(--muted);
+  --color-panel: var(--panel);
+  --color-line: var(--line);
+  --color-signal: var(--signal);
+  --color-signal-bright: var(--signal-bright);
+  --color-critical: var(--critical);
+  --color-support: var(--support);
+  --font-sans: var(--font-bias-sans);
+  --font-mono: var(--font-bias-mono);
+  --text-xs: 0.8rem;
+  --text-xs--line-height: 1.35rem;
+  --text-sm: 0.95rem;
+  --text-sm--line-height: 1.55rem;
+  --text-base: 1.075rem;
+  --text-base--line-height: 1.8rem;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--ink);
+  font-size: clamp(16px, calc(15px + 0.18vw), 18px);
+}
+
+body {
+  margin: 0;
+  background: var(--ink);
+  color: var(--paper);
+  font-family: var(--font-bias-sans);
+}
+
+button,
+input {
+  font: inherit;
+}
+
+::selection {
+  background: var(--signal);
+  color: var(--ink);
+}
+
+.pitch-grid {
+  background-image:
+    linear-gradient(var(--line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--line) 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask-image: linear-gradient(to bottom, black, transparent 82%);
+}
+
+.glow {
+  background: color-mix(in srgb, var(--signal) 13%, transparent);
+  filter: blur(90px);
+}
+
+.report-glow {
+  background: color-mix(in srgb, var(--signal) 8%, transparent);
+  filter: blur(100px);
+}
+
+.eyebrow {
+  font-family: var(--font-bias-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.17em;
+  line-height: 1.3;
+  text-transform: uppercase;
+  color: var(--signal);
+}
+
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: rgba(226, 236, 228, 0.07);
+}
+
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(226, 236, 228, 0.09), transparent);
+  animation: skeleton-sweep 1.5s infinite;
+}
+
+@keyframes skeleton-sweep {
+  to { transform: translateX(100%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
