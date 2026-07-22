@@ -181,6 +181,22 @@ class TopicSubmissionRequest(PublicModel):
     query: str = Field(min_length=10, max_length=500)
 
 
+TopicSubmissionStatus = Literal[
+    "submitted",
+    "assessing_viability",
+    "needs_clarification",
+    "insufficient_coverage",
+    "too_broad",
+    "too_narrow",
+    "unsafe",
+    "duplicate_topic",
+    "queued_for_analysis",
+    "analyzing",
+    "report_ready",
+    "failed",
+]
+
+
 class ViabilityResult(PublicModel):
     status: str
     confidence: float = Field(ge=0, le=1)
@@ -194,7 +210,7 @@ class ViabilityResult(PublicModel):
 
 class TopicSubmissionResponse(PublicModel):
     id: UUID
-    status: str
+    status: TopicSubmissionStatus
     query: str
     topic_id: UUID | None = None
     attempt_count: int = Field(ge=0, le=3)

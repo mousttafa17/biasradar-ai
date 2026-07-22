@@ -191,14 +191,146 @@ def test_topic_submission_claimed_once_across_workers(staging_db):
     staging_db.submission_ids.append(str(submission["id"]))
 
     def claim() -> list[dict[str, object]]:
-        return staging_db.new_client().rpc(
-            "claim_topic_submissions", {"p_limit": 1}
-        ).execute().data
+        return (
+            staging_db.new_client()
+            .rpc("claim_topic_submissions", {"p_limit": 1})
+            .execute()
+            .data
+        )
 
     with ThreadPoolExecutor(max_workers=6) as executor:
         results = executor.map(lambda _: claim(), range(6))
         rows = [row for result in results for row in result]
     assert [str(row["id"]) for row in rows].count(str(submission["id"])) == 1
+
+
+def test_accepted_submission_runs_through_initial_analysis_lifecycle(staging_db):
+    token = uuid4().hex
+    query = f"Was the penalty decision unfair to Lifecycle FC {token}?"
+    submission = (
+        staging_db.client.table("topic_submissions")
+        .insert(
+            {
+                "raw_query": query,
+                "normalized_query": query.casefold(),
+                "query_hash": hashlib.sha256(query.casefold().encode()).hexdigest(),
+                "status": "assessing_viability",
+            }
+        )
+        .execute()
+        .data[0]
+    )
+    staging_db.submission_ids.append(str(submission["id"]))
+
+    topic_id = (
+        staging_db.client.rpc(
+            "save_topic_viability",
+            {
+                "p_submission_id": submission["id"],
+                "p_status": "accepted",
+                "p_confidence": 0.9,
+                "p_coverage_signals": {
+                    "item_count": 12,
+                    "independent_source_count": 7,
+                    "channel_counts": {"news": 9, "interview": 3},
+                    "sufficient": True,
+                },
+                "p_topic_definition": {
+                    "canonical_name": f"Lifecycle football controversy {token}",
+                    "subject": "Lifecycle FC",
+                    "supporting_frame": "The penalty was correct",
+                    "opposing_frame": "The penalty was incorrect",
+                    "keywords": ["Lifecycle FC", "penalty"],
+                },
+                "p_reasons": ["Sufficient independent football coverage."],
+                "p_clarification_questions": [],
+                "p_duplicate_topic_id": None,
+                "p_prompt_version": "football-viability-integration",
+                "p_model_id": "integration-model",
+            },
+        )
+        .execute()
+        .data
+    )
+    staging_db.topic_ids.append(str(topic_id))
+
+    queued = (
+        staging_db.client.table("topic_submissions")
+        .select("status,topic_id")
+        .eq("id", submission["id"])
+        .single()
+        .execute()
+        .data
+    )
+    schedule = (
+        staging_db.client.table("topic_schedules")
+        .select("id,initial_submission_id,next_run_at")
+        .eq("topic_id", topic_id)
+        .single()
+        .execute()
+        .data
+    )
+    assert queued == {"status": "queued_for_analysis", "topic_id": topic_id}
+    assert schedule["initial_submission_id"] == submission["id"]
+
+    claimed = (
+        staging_db.client.rpc("claim_due_topic_schedules", {"p_limit": 20})
+        .execute()
+        .data
+    )
+    assert str(schedule["id"]) in {str(row["id"]) for row in claimed}
+    analyzing = (
+        staging_db.client.table("topic_submissions")
+        .select("status")
+        .eq("id", submission["id"])
+        .single()
+        .execute()
+        .data
+    )
+    assert analyzing["status"] == "analyzing"
+
+    now = datetime.now(UTC)
+    staging_db.client.table("topic_reports").insert(
+        {
+            "topic_id": topic_id,
+            "period_start": (now - timedelta(days=1)).isoformat(),
+            "period_end": now.isoformat(),
+            "total_items": 0,
+            "pro_percent": 0,
+            "anti_percent": 0,
+            "neutral_percent": 0,
+            "mixed_percent": 0,
+            "unclear_percent": 0,
+            "directional_pro_percent": 0,
+            "directional_anti_percent": 0,
+            "overall_bias_score": 0,
+            "confidence_score": 0,
+            "source_count": 0,
+            "independent_content_groups": 0,
+            "syndicated_items": 0,
+            "deduplicated_items": 0,
+            "report_text": "Lifecycle integration report.",
+            "report_data": {},
+        }
+    ).execute()
+
+    staging_db.client.rpc(
+        "finish_topic_schedule",
+        {
+            "p_schedule_id": schedule["id"],
+            "p_succeeded": True,
+            "p_error": None,
+        },
+    ).execute()
+    ready = (
+        staging_db.client.table("topic_submissions")
+        .select("status")
+        .eq("id", submission["id"])
+        .single()
+        .execute()
+        .data
+    )
+    assert ready["status"] == "report_ready"
 
 
 def test_schedule_lease_backoff_and_worker_heartbeat(staging_db):
@@ -211,9 +343,12 @@ def test_schedule_lease_backoff_and_worker_heartbeat(staging_db):
     )
 
     def claim() -> list[dict[str, object]]:
-        return staging_db.new_client().rpc(
-            "claim_due_topic_schedules", {"p_limit": 1}
-        ).execute().data
+        return (
+            staging_db.new_client()
+            .rpc("claim_due_topic_schedules", {"p_limit": 1})
+            .execute()
+            .data
+        )
 
     with ThreadPoolExecutor(max_workers=6) as executor:
         results = executor.map(lambda _: claim(), range(6))
@@ -231,7 +366,9 @@ def test_schedule_lease_backoff_and_worker_heartbeat(staging_db):
     ).execute()
     updated = (
         staging_db.client.table("topic_schedules")
-        .select("last_status,last_error,consecutive_failures,next_run_at,lease_expires_at")
+        .select(
+            "last_status,last_error,consecutive_failures,next_run_at,lease_expires_at"
+        )
         .eq("id", schedule["id"])
         .single()
         .execute()

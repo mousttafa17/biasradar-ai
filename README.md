@@ -172,6 +172,7 @@ supabase/migrations/202607190010_evidence_review.sql
 supabase/migrations/202607190011_domain_analysis.sql
 supabase/migrations/202607190012_ingestion_provenance.sql
 supabase/migrations/202607190013_worker_scheduling.sql
+supabase/migrations/202607230014_submission_analysis_lifecycle.sql
 ```
 
 You can apply them with your normal Supabase migration workflow or paste them into the
@@ -273,6 +274,8 @@ model. The model cannot override duplicate detection or the minimum threshold of
 coverage items from three independent sources. Results are one of `accepted`,
 `needs_clarification`, `insufficient_coverage`, `too_broad`, `too_narrow`, `unsafe`,
 or `duplicate_topic`. Only `accepted` assessments atomically create an active topic.
+An accepted submission also creates or advances an immediately due schedule, allowing
+the same long-running worker cycle to claim its first analysis run.
 
 Fetch and analyze up to five articles:
 
@@ -402,6 +405,13 @@ PostgreSQL claims use row locks with `SKIP LOCKED`, so multiple replicas can pol
 safely. Schedule leases recover abandoned work, successful jobs advance by their
 configured interval, and failed jobs use bounded retry backoff. Scheduling is
 currently daily-or-slower because pipeline idempotency is daily.
+
+Public topic-submission status progresses through `submitted`,
+`assessing_viability`, and—when viable—`queued_for_analysis`, `analyzing`, then
+`report_ready`. Viability can instead finish as `needs_clarification`,
+`insufficient_coverage`, `too_broad`, `too_narrow`, `unsafe`, or `duplicate_topic`;
+exhausted intake retries finish as `failed`. A failed scheduled run returns its
+initial submission to `queued_for_analysis` while bounded schedule backoff is active.
 
 For container deployment, keep production secrets in the platform's secret manager
 or an uncommitted `.env`, then run:

@@ -259,6 +259,22 @@ def test_topics_is_paginated_and_allow_listed() -> None:
     assert "internal_notes" not in response.text
 
 
+def test_frontend_origin_receives_bounded_cors_preflight_headers() -> None:
+    client, _ = _client()
+
+    response = client.options(
+        "/topics",
+        headers={
+            "Origin": "http://localhost:3000",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+    assert "GET" in response.headers["access-control-allow-methods"]
+
+
 def test_overview_returns_frontend_ready_summary_without_internal_data() -> None:
     client, _ = _client()
 

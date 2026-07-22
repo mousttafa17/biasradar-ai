@@ -23,9 +23,7 @@ class StagingDatabase:
     worker_ids: list[str] = field(default_factory=list)
 
     def new_client(self, *, anonymous: bool = False) -> Client:
-        return create_client(
-            self.url, self.anon_key if anonymous else self.service_key
-        )
+        return create_client(self.url, self.anon_key if anonymous else self.service_key)
 
     def create_topic(self) -> dict[str, object]:
         suffix = uuid4().hex
@@ -49,17 +47,6 @@ class StagingDatabase:
 
     def cleanup(self) -> None:
         # Delete non-cascading audit rows first; topic-owned rows then cascade.
-        for topic_id in self.topic_ids:
-            self.client.table("topic_reports").delete().eq(
-                "topic_id", topic_id
-            ).execute()
-            self.client.table("pipeline_runs").delete().eq(
-                "topic_id", topic_id
-            ).execute()
-            self.client.table("raw_items").delete().eq(
-                "topic_id", topic_id
-            ).execute()
-            self.client.table("topics").delete().eq("id", topic_id).execute()
         for submission_id in self.submission_ids:
             self.client.table("topic_viability_assessments").delete().eq(
                 "submission_id", submission_id
@@ -67,6 +54,15 @@ class StagingDatabase:
             self.client.table("topic_submissions").delete().eq(
                 "id", submission_id
             ).execute()
+        for topic_id in self.topic_ids:
+            self.client.table("topic_reports").delete().eq(
+                "topic_id", topic_id
+            ).execute()
+            self.client.table("pipeline_runs").delete().eq(
+                "topic_id", topic_id
+            ).execute()
+            self.client.table("raw_items").delete().eq("topic_id", topic_id).execute()
+            self.client.table("topics").delete().eq("id", topic_id).execute()
         for worker_id in self.worker_ids:
             self.client.table("worker_instances").delete().eq(
                 "worker_id", worker_id

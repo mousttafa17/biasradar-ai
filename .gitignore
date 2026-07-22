@@ -1,7 +1,31 @@
+# Local secrets and environment overrides
 .env
+.env.*
+!.env.example
+
+# Python environments, caches, coverage, and build output
 .venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# Supabase CLI local state
+supabase/.branches/
+supabase/.temp/
+
+# Editor and operating-system files
+.DS_Store
+.idea/
+.vscode/
+
+# Local logs
+*.log

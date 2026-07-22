@@ -537,7 +537,11 @@ def assess_topic(
             )
             raise typer.Exit(code=1)
         submission = create_topic_submission(supabase, normalized_query)
-        if submission.status not in {"submitted", "assessing", "failed"}:
+        if submission.status not in {
+            "submitted",
+            "assessing_viability",
+            "failed",
+        }:
             console.print(
                 f"[green]Submission already assessed:[/green] {submission.status}"
             )

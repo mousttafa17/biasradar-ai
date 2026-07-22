@@ -144,6 +144,7 @@ REQUIRED_COLUMNS = {
         "last_status",
         "last_error",
         "consecutive_failures",
+        "initial_submission_id",
     },
     "worker_instances": {"worker_id", "started_at", "heartbeat_at", "metadata"},
     "topic_submissions": {
@@ -514,9 +515,9 @@ def create_topic_submission(client: Client, query: str) -> TopicSubmission:
         row = existing.data[0]
         if row["status"] == "failed":
             client.table("topic_submissions").update(
-                {"status": "assessing", "assessed_at": None}
+                {"status": "assessing_viability", "assessed_at": None}
             ).eq("id", row["id"]).execute()
-            row["status"] = "assessing"
+            row["status"] = "assessing_viability"
         return TopicSubmission(
             submission_id=str(row["id"]),
             status=str(row["status"]),
@@ -529,7 +530,7 @@ def create_topic_submission(client: Client, query: str) -> TopicSubmission:
                 "raw_query": query,
                 "normalized_query": normalized,
                 "query_hash": query_hash,
-                "status": "assessing",
+                "status": "assessing_viability",
             }
         )
         .execute()
@@ -538,7 +539,7 @@ def create_topic_submission(client: Client, query: str) -> TopicSubmission:
         raise ValueError("Supabase did not return a topic submission id")
     return TopicSubmission(
         submission_id=str(response.data[0]["id"]),
-        status="assessing",
+        status="assessing_viability",
         topic_id=None,
     )
 
